@@ -1,4 +1,4 @@
-# 📘 SRE Runbook: AWS Waste Hunter Bot
+# SRE Runbook: AWS Waste Hunter Bot
 
 **Service Name:** `aws-waste-hunter-lambda`
 **Service Owner:** Platform Engineering / SRE
@@ -6,12 +6,12 @@
 
 ---
 
-## 🎯 Purpose
+## Purpose
 This operational playbook outlines the troubleshooting steps, alert responses, and remediation workflows for the **AWS Waste Hunter** automation bot. Use this guide when the automation fails or when high waste is detected.
 
 ---
 
-## 🚨 Alerts & Troubleshooting
+##  Alerts & Troubleshooting
 
 ### Alert 1: Lambda Failure / No Report Received
 **Symptom:** The weekly report was not delivered to SNS, or the Lambda `Errors` metric in CloudWatch > 0.
@@ -45,16 +45,16 @@ This operational playbook outlines the troubleshooting steps, alert responses, a
 
 ---
 
-## 🛠️ Remediation Playbooks (Waste Cleanup)
+##  Remediation Playbooks (Waste Cleanup)
 *Note: The bot **reports** waste. Humans (or future automation) must **resolve** it.*
 
-### 💾 1. Unattached EBS Volumes
+###  1. Unattached EBS Volumes
 * **Check:** Is the volume state `available`?
 * **Action:**
     1.  Create a final snapshot (tag: `waste-hunter-backup`).
     2.  Delete the volume.
 
-### 🖥️ 2. Idle EC2 Instances
+###  2. Idle EC2 Instances
 * **Check:** CPU < 2% for 7 days.
 * **Verification:** Check `NetworkIn/Out`. If network traffic is high, it might be a proxy or relay server (do not delete).
 * **Action:**
@@ -62,7 +62,7 @@ This operational playbook outlines the troubleshooting steps, alert responses, a
     2.  Notify the `Owner` tag email.
     3.  Terminate after 7 days if no response.
 
-### 🗄️ 3. Stopped RDS Clusters
+###  3. Stopped RDS Clusters
 * **Check:** Storage costs continue even when stopped.
 * **Action:**
     1.  Take a manual snapshot.
@@ -70,7 +70,7 @@ This operational playbook outlines the troubleshooting steps, alert responses, a
 
 ---
 
-## 📝 Postmortem Template
+##  Postmortem Template
 If the bot fails to run for > 2 weeks, perform a mini-postmortem.
 
 * **Summary:** (e.g., Bot failed due to API throttling on large account)
@@ -80,7 +80,7 @@ If the bot fails to run for > 2 weeks, perform a mini-postmortem.
 
 ---
 
-## 📞 Ownership & Escalation
+##  Ownership & Escalation
 * **Primary On-Call:** SRE Intern / Junior SRE
 * **Escalation:** Platform Team Lead
 * **Repository:** `github.com/org/aws-waste-hunter`
