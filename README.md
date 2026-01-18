@@ -78,7 +78,7 @@ aws-waste-hunter/
 ```
 ---
 
-## ⚙️ Setup & Deployment
+## Setup & Deployment
 
 ### Prerequisites
 - Python 3.9+  
@@ -139,30 +139,30 @@ cron(0 14 ? * MON *)   # Every Monday 14:00 UTC
 
 ---
 
-## 📊 Example Output
+## Example Output
 
 **Subject:** AWS Waste Hunter — Weekly Cost Optimization Report
 
 > **Total Monthly Waste:** $42.30
-> **🚨 Wasted Resources**
+> ** Wasted Resources**
 > * `vol-0abc123` (EBS): $10.00/mo
 > * `i-0xyz789` (EC2): $32.30/mo
 > 
 > 
-> **🏷️ Tagging Violations**
+> ** Tagging Violations**
 > * `i-0xyz789` missing: `owner`, `cost-center`
 > 
 > 
 
 ---
 
-## 📈 Impact
+##  Impact
 
 * **Reduces Toil:** Eliminates manual cloud audits.
 * **Improves Attribution:** Ensures every dollar has an owner.
 * **Improves Reliability:** Prevents cost-driven incidents (e.g., limits reached).
 * **Builds SRE Discipline:** Cost optimization becomes an operational habit.
 
-## 📘 Operations
+##  Operations
 
 See [runbook.md](runbook.md) for on-call playbooks, alerts, and remediation workflows.
