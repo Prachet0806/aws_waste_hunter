@@ -22,16 +22,34 @@ class TestGetRegionFromAz:
         assert get_region_from_az("us-east-1-wl1-bos-wlz-1") == "us-east-1"
         assert get_region_from_az("us-west-2-wl1-sfo-wlz-1") == "us-west-2"
 
+    def test_govcloud_zone(self):
+        """Test GovCloud AZ format."""
+        assert get_region_from_az("us-gov-west-1a") == "us-gov-west-1"
+        assert get_region_from_az("us-gov-east-1b") == "us-gov-east-1"
+
+    def test_iso_zone(self):
+        """Test ISO (us-iso / us-isob / cn) AZ formats."""
+        assert get_region_from_az("us-iso-east-1a") == "us-iso-east-1"
+        assert get_region_from_az("us-isob-east-1a") == "us-isob-east-1"
+        assert get_region_from_az("cn-north-1a") == "cn-north-1"
+        assert get_region_from_az("cn-northwest-1b") == "cn-northwest-1"
+
+    def test_outpost_zone(self):
+        """Test Outposts-style AZ format."""
+        assert get_region_from_az("us-east-1a-123456789012") == "us-east-1"
+
     def test_empty_az(self):
         """Test empty/None AZ."""
         assert get_region_from_az(None) is None
         assert get_region_from_az("") is None
 
     def test_malformed_az(self):
-        """Test malformed AZ (short string)."""
-        # Should return the string as-is if not enough parts
-        assert get_region_from_az("us") == "us"
-        assert get_region_from_az("us-east") == "us-east"
+        """Test malformed AZ (short string) fail-open to None."""
+        # Malformed input must not propagate as a region (would cause InvalidEndpoint).
+        assert get_region_from_az("us") is None
+        assert get_region_from_az("us-east") is None
+        assert get_region_from_az(123) is None
+        assert get_region_from_az("not-an-az-at-all-xyz") is None
 
     def test_multiple_standard_azs(self):
         """Test multiple standard AZ formats."""

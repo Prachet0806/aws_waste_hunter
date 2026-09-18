@@ -197,17 +197,17 @@ class TestEdgeCases:
         assert violations[0]["resource_id"] == "vol-1"
 
     def test_empty_required_tags(self, monkeypatch):
-        """Test with no required tags configured."""
+        """Test with empty REQUIRED_TAGS falls back to defaults (never disables)."""
         monkeypatch.setenv("REQUIRED_TAGS", "")
-        
+
         resources = [
             {"type": "EBS", "id": "vol-1", "tags": {}},
         ]
 
         violations = tag_checker.check_tag_compliance(resources)
 
-        # No required tags means no violations
-        assert len(violations) == 0
+        # Empty override falls back to defaults -> violation expected
+        assert len(violations) == 1
 
     def test_tag_value_empty_string(self, monkeypatch):
         """Test that empty tag values still count as present."""
@@ -225,3 +225,62 @@ class TestEdgeCases:
 
         # Key exists, so no violation
         assert len(violations) == 0
+
+
+class TestComplianceStats:
+    """Test compute_compliance_stats scoring (B6)."""
+
+    def test_full_compliance(self, monkeypatch):
+        """Test 100% score when all resources are compliant."""
+        monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
+        resources = [
+            {"type": "EBS", "id": "vol-1", "tags": {"owner": "sre", "env": "prod"}},
+            {"type": "EC2", "id": "i-1", "tags": {"owner": "sre", "env": "prod"}},
+        ]
+
+        stats = tag_checker.compute_compliance_stats(resources)
+
+        assert stats["total"] == 2
+        assert stats["compliant"] == 2
+        assert stats["violations"] == 0
+        assert stats["percent"] == 100.0
+        assert stats["by_type"] == {}
+        assert stats["missing_counts"] == {}
+
+    def test_partial_compliance(self, monkeypatch):
+        """Test mixed compliance gives correct percentage."""
+        monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
+        resources = [
+            {"type": "EBS", "id": "vol-1", "tags": {"owner": "sre", "env": "prod"}},
+            {"type": "EC2", "id": "i-1", "tags": {"owner": "sre"}},  # missing env
+        ]
+
+        stats = tag_checker.compute_compliance_stats(resources)
+
+        assert stats["total"] == 2
+        assert stats["compliant"] == 1
+        assert stats["violations"] == 1
+        assert stats["percent"] == 50.0
+        assert stats["by_type"] == {"EC2": 1}
+        assert stats["missing_counts"] == {"env": 1}
+
+    def test_empty_resources(self, monkeypatch):
+        """Test empty resource list scores 0% (honest 0/0, not misleading 100%)."""
+        stats = tag_checker.compute_compliance_stats([])
+
+        assert stats["total"] == 0
+        assert stats["percent"] == 0.0
+        assert stats["by_type"] == {}
+        assert stats["missing_counts"] == {}
+
+    def test_violations_param_overrides(self, monkeypatch):
+        """Test passing violations directly avoids re-computation."""
+        resources = [{"type": "EBS", "id": "vol-1", "tags": {"owner": "sre", "env": "prod"}}]
+        violations = [{"resource_id": "vol-1", "type": "EBS", "missing_tags": ["owner"]}]
+
+        stats = tag_checker.compute_compliance_stats(resources, violations)
+
+        assert stats["compliant"] == 0
+        assert stats["violations"] == 1
+        assert stats["by_type"] == {"EBS": 1}
+        assert stats["missing_counts"] == {"owner": 1}

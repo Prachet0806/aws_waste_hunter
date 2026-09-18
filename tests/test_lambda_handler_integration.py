@@ -2,6 +2,14 @@ import pytest
 import lambda_handler
 
 
+@pytest.fixture(autouse=True)
+def _mock_new_scanners(monkeypatch):
+    """Stub the newer scanners so existing tests remain deterministic."""
+    monkeypatch.setattr(lambda_handler, "scan_unattached_eips", lambda: [])
+    monkeypatch.setattr(lambda_handler, "scan_orphaned_snapshots", lambda: [])
+    monkeypatch.setattr(lambda_handler, "scan_idle_rds", lambda: [])
+
+
 class TestHandlerIntegration:
     """Integration tests for the full Lambda handler."""
 
@@ -19,7 +27,7 @@ class TestHandlerIntegration:
         def mock_scan_rds():
             return [{"type": "RDS", "id": "db-1", "tags": {}}]
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -55,7 +63,7 @@ class TestHandlerIntegration:
         def mock_scan_rds():
             return []
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -81,7 +89,7 @@ class TestHandlerIntegration:
         def mock_scan():
             return []
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             raise RuntimeError("SNS unavailable")
 
         def mock_archive(report):
@@ -97,7 +105,8 @@ class TestHandlerIntegration:
 
         result = lambda_handler.handler({}, {})
 
-        assert result["status"] == "partial"
+        # Total failure with nothing estimated + delivery error -> failed.
+        assert result["status"] == "failed"
         assert result["scan_errors"] == 0
         assert result["delivery_errors"] == 1
 
@@ -106,7 +115,7 @@ class TestHandlerIntegration:
         def mock_fail():
             raise RuntimeError("AWS API error")
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -132,7 +141,7 @@ class TestHandlerIntegration:
         def mock_scan():
             return [{"type": "EBS", "id": "vol-1", "size_gb": 10, "tags": {}}]
 
-        def mock_fail(report):
+        def mock_fail(report, result=None):
             raise RuntimeError("Delivery failed")
 
         monkeypatch.setattr(lambda_handler, "scan_unattached_ebs", mock_scan)
@@ -157,7 +166,7 @@ class TestHandlerIntegration:
         def mock_estimate(resources):
             raise RuntimeError("Pricing API error")
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -185,7 +194,7 @@ class TestHandlerIntegration:
         def mock_check(resources):
             raise RuntimeError("Tag check error")
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -210,7 +219,7 @@ class TestHandlerIntegration:
         def mock_scan():
             return []
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             pass
 
         def mock_archive(report):
@@ -241,7 +250,7 @@ class TestHandlerIntegration:
         def mock_scan():
             return []
 
-        def mock_send(report):
+        def mock_send(report, result=None):
             # Check that error is in report
             assert error_message in report
             assert "ValueError" in report

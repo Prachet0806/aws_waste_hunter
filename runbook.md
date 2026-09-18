@@ -28,40 +28,43 @@ This operational playbook outlines the troubleshooting steps, alert responses, a
 3.  **Validate Permissions:**
     * Check CloudTrail for `AccessDenied` events related to the Lambda execution role.
 4.  **Check Handler Response:**
-    * Lambda returns status: `ok` or `partial`
+    * Lambda returns status: `ok`, `partial`, or `failed` (`failed` = nothing estimated plus delivery errors)
     * Check `scan_errors` and `delivery_errors` counts in response
+    * Check `no_metrics` count for resources skipped fail-open due to missing/errored CloudWatch data
+    * Check `high_waste` flag (waste >= `WASTE_ALERT_THRESHOLD`) and `compliance_percent`
 
 **Common Failures Matrix:**
 
 | Error Message | Probable Cause | Remediation |
 | :--- | :--- | :--- |
-| `AccessDenied` | IAM Role missing permissions | Add missing action (e.g., `ec2:DescribeVolumes`, `pricing:GetProducts`) to IAM Policy. |
-| `Task timed out` | Scanning takes too long | Increase Lambda Timeout (Default 3s → 300s recommended). Increase Memory to 512MB. |
-| `Endpoint request timed out` | API Throttling | Already handled with adaptive retries. Check if retry limit reached. |
-| `KeyError: 'Tags'` | Resource has no tags | ✅ Fixed in v2.0 - code handles empty tag lists gracefully. |
-| `ModuleNotFoundError` | Missing dependencies | Ensure all files in deployment package. Run `pip install -r requirements.txt -t .` |
-| `ValueError: SNS_TOPIC_ARN is not set` | Missing env var | Set required environment variables in Lambda configuration. |
-| `Region parsing failed` | Unknown AZ format | ✅ Fixed in v2.0 - handles Local Zones, Wavelength, standard AZs. |
+| `AccessDenied` | IAM Role missing permissions | Add missing action (e.g., `ec2:DescribeVolumes`, `ec2:DescribeAddresses`, `ec2:DescribeSnapshots`, `ec2:DescribeImages`, `rds:DescribeDBInstances`, `cloudwatch:GetMetricData`, `pricing:GetProducts`) to IAM Policy. |
+| `Task timed out` / scanner `TimeoutError` | Scanning takes too long | Increase Lambda Timeout (Default 3s → 300s recommended). Increase Memory to 512MB. Scanners run in parallel with per-scanner timeouts and fail open. |
+| `Endpoint request timed out` | API Throttling | Handled with adaptive retries (max 5 attempts). Check if retry limit reached. |
+| `ValueError: SNS_TOPIC_ARN is not set` | Missing env var | Set required environment variables in Lambda configuration (see `env.example`). |
+| `ValueError: REPORT_BUCKET ...` | Bucket misconfigured | `REPORT_BUCKET` must be a bucket name, not an ARN or path. |
+| `Region parsing failed` / `region is None` | Unknown AZ format | Malformed AZs now resolve to `None` and are logged; estimator defaults pricing region to `us-east-1`. |
+| High `no_metrics` count | Missing CloudWatch data/permissions | Resources are skipped fail-open and logged. Verify `cloudwatch:GetMetricData` / `GetMetricStatistics` permissions and detailed monitoring. |
 
 ---
 
 ### Alert 2: "S3 Access Denied"
-**Symptom:** Report delivered via SNS but failed to archive to S3.  
-**Status:** `partial` with `delivery_errors: 1`
+**Symptom:** Report delivered via SNS but failed to archive to S3.
+**Status:** `partial` (or `failed` if nothing was estimated) with `delivery_errors >= 1`
 
 **Fix:**
-1.  Check `REPORT_BUCKET` environment variable matches the actual bucket name (not ARN).
+1.  Check `REPORT_BUCKET` environment variable matches the actual bucket name (not ARN, no `/` path).
 2.  Verify Lambda Role has `s3:PutObject` permission for that specific bucket ARN.
 3.  Check S3 bucket policy doesn't deny Lambda role access.
+4.  If the bucket enforces SSE-KMS/Object Lock, set `S3_SSE=aws:kms` + `S3_KMS_KEY_ID` (default archive uses `AES256`).
 
-### Alert 3: Partial Scan Completion
-**Symptom:** Handler returns `status: "partial"` with non-zero error counts.  
-**Severity:** Low-Medium (Some data collected, but incomplete)
+### Alert 3: Partial/Failed Scan Completion
+**Symptom:** Handler returns `status: "partial"` or `"failed"` with non-zero error counts.
+**Severity:** Low-Medium (Some data collected, but incomplete); `failed` means nothing usable was produced.
 
 **Diagnosis:**
 1.  **Check scan_errors count:**
-    * Indicates individual scanner failures (EBS, EC2, ELB, RDS)
-    * Review CloudWatch logs for specific scanner errors
+    * Indicates individual scanner failures (EBS, EC2, ELB, stopped RDS, idle RDS, EIP, snapshots)
+    * Review CloudWatch Logs for specific scanner errors (search `Fail-open skip` for metric skips)
 2.  **Check delivery_errors count:**
     * Indicates SNS or S3 delivery failures
     * Report was generated but not delivered
@@ -81,7 +84,7 @@ This operational playbook outlines the troubleshooting steps, alert responses, a
 - Manual rerun if immediate data needed: `aws lambda invoke --function-name aws-waste-hunter`
 
 ### Alert 4: High Monthly Waste Detected
-**Symptom:** Report shows waste >$1000/month.  
+**Symptom:** Report shows waste >= `$WASTE_ALERT_THRESHOLD`/month (default $1000), `high_waste: true`, CRITICAL log.
 **Severity:** High (Cost Impact)
 
 **Action:**
@@ -188,7 +191,55 @@ aws ec2 describe-volumes --volume-ids vol-xxxxx --query 'Volumes[0].State'
     ```
 3.  Delete associated target groups if orphaned
 
-### 🗄️ 4. Stopped RDS Clusters/Instances
+### 🔌 4a. Unattached Elastic IPs
+**Risk:** Low (no compute impact)
+**Cost Impact:** ~$3.60/month per unassociated EIP
+
+**Verification:**
+```bash
+aws ec2 describe-addresses --allocation-ids eipalloc-xxxxx \
+  --query 'Addresses[0].AssociationId'
+# Should return: null/empty (unassociated)
+```
+
+**Action:**
+1.  Confirm no association (InstanceId/NetworkInterfaceId empty).
+2.  Release the address:
+    ```bash
+    aws ec2 release-address --allocation-id eipalloc-xxxxx
+    ```
+
+### 📸 4b. Orphaned EBS Snapshots
+**Risk:** Low (not referenced by any AMI, past `MIN_SNAPSHOT_AGE_DAYS`)
+**Cost Impact:** ~$0.05/GB/month
+
+**Verification:**
+```bash
+aws ec2 describe-snapshots --snapshot-ids snap-xxxxx \
+  --query 'Snapshots[0].StartTime'
+# Confirm age exceeds MIN_SNAPSHOT_AGE_DAYS and no AMI references it
+```
+
+**Action:**
+1.  Confirm no AMI references the snapshot.
+2.  Delete the snapshot:
+    ```bash
+    aws ec2 delete-snapshot --snapshot-id snap-xxxxx
+    ```
+
+### 😴 4c. Idle RDS Instances/Clusters
+**Risk:** Medium (running workloads with low CPU/connections over 7 days)
+**Cost Impact:** Full instance rate (see report)
+
+**Verification:**
+1.  Check avg CPU < `RDS_CPU_THRESHOLD` (default 5%) and peak connections <= `RDS_CONNECTIONS_THRESHOLD` (default 1) over 7 days.
+2.  Confirm with application owners before stopping.
+
+**Action:**
+1.  Contact owner via tags.
+2.  Stop or downsize after approval.
+
+### 🗄️ 4d. Stopped RDS Clusters/Instances
 **Risk:** Medium (Data preservation needed)  
 **Cost Impact:** Storage costs continue when stopped
 
@@ -235,7 +286,7 @@ If the bot fails to run for > 2 weeks, perform a mini-postmortem.
 
 * **Summary:** (e.g., Bot failed due to API throttling on large account)
 * **Root Cause:** (e.g., Default boto3 retry limit reached)
-* **Resolution:** (e.g., Added `config=Config(retries={'max_attempts': 10})`)
+* **Resolution:** (e.g., Tuned shared `BOTO3_CONFIG` adaptive retries, currently max 5 attempts with 5s connect / 10s read timeouts)
 * **Prevention:** (e.g., Add monitoring on Lambda `Duration` metric)
 
 ---
@@ -330,16 +381,13 @@ cat /tmp/response.json
 
 * **Primary On-Call:** SRE Team
 * **Escalation:** Platform Team Lead → Cloud Architect
-* **Repository:** `github.com/org/aws-waste-hunter`
-* **Documentation:** See `README.md`, `tests/README.md`
+* **Documentation:** See `README.md`, `tests/README.md`, `NEXT_STEPS_PLAN.md`
+* **Full env reference:** `env.example` (copy to `.env`, never commit `.env`)
 * **Slack Channel:** `#sre-finops`
 
 ## 📚 Additional Resources
 
 - **Test Documentation:** `tests/README.md`
-- **Fix History:** `FIXES_SUMMARY.md`
-- **Deployment Guide:** `NEXT_STEPS_PLAN.md`
-- **Test Failures:** `TEST_FAILURES_FIX.md`
 - **AWS Documentation:** 
   - [Lambda Best Practices](https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html)
   - [Pricing API](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html)

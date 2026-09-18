@@ -246,3 +246,198 @@ class TestTotalCalculation:
 
         assert len(estimated) == 0
         assert total == 0
+
+
+class TestElbTypePricing:
+    """Test that NLB/Classic ELBs use type-specific live pricing."""
+
+    def test_nlb_uses_nlb_price(self, monkeypatch):
+        """Test NLB uses _get_nlb_hourly_price in live mode."""
+        monkeypatch.setenv("PRICING_MODE", "live")
+        estimator._PRICE_CACHE.clear()
+        monkeypatch.setattr(estimator, "_get_nlb_hourly_price", lambda region: 0.02)
+        monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.99)
+
+        resources = [
+            {"type": "ELB", "id": "nlb-1", "lb_type": "NETWORK", "region": "us-east-1"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == round(0.02 * estimator.HOURS_PER_MONTH, 2)
+
+    def test_classic_uses_classic_price(self, monkeypatch):
+        """Test Classic ELB uses _get_classic_elb_hourly_price in live mode."""
+        monkeypatch.setenv("PRICING_MODE", "live")
+        estimator._PRICE_CACHE.clear()
+        monkeypatch.setattr(estimator, "_get_classic_elb_hourly_price", lambda region: 0.03)
+        monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.99)
+
+        resources = [
+            {"type": "ELB", "id": "classic-1", "lb_type": "CLASSIC", "region": "us-east-1"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == round(0.03 * estimator.HOURS_PER_MONTH, 2)
+
+    def test_alb_uses_alb_price(self, monkeypatch):
+        """Test ALB uses _get_alb_hourly_price in live mode."""
+        monkeypatch.setenv("PRICING_MODE", "live")
+        estimator._PRICE_CACHE.clear()
+        monkeypatch.setattr(estimator, "_get_nlb_hourly_price", lambda region: 0.02)
+        monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.01)
+
+        resources = [
+            {"type": "ELB", "id": "alb-1", "lb_type": "APPLICATION", "region": "us-east-1"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == round(0.01 * estimator.HOURS_PER_MONTH, 2)
+
+
+class TestRdsInstancePricing:
+    """Test RDS instance pricing by class."""
+
+    def test_rds_instance_known_class(self, monkeypatch):
+        """Test known instance class uses class-specific price."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "RDS_INSTANCE", "id": "instance-1", "instance_class": "db.t3.small"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == estimator.DEFAULT_PRICING["RDS_INSTANCE"]["db.t3.small"]
+
+    def test_rds_instance_unknown_class_falls_back(self, monkeypatch):
+        """Test unknown instance class falls back to cluster default."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "RDS_INSTANCE", "id": "instance-1", "instance_class": "db.x1e.32xlarge"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == estimator.DEFAULT_PRICING["RDS"]
+
+
+class TestLivePricingFilters:
+    """Test live pricing lookup details."""
+
+    def test_ebs_uses_volume_api_name_filter(self, monkeypatch):
+        """Test EBS live lookup filters on volumeApiName to distinguish gp2/gp3."""
+        captured_calls = []
+
+        class FakePricing:
+            def get_products(self, **kwargs):
+                captured_calls.append(kwargs["Filters"])
+                return {"PriceList": []}
+
+        monkeypatch.setattr(estimator, "_get_pricing_client", lambda: FakePricing())
+        estimator._PRICE_CACHE.clear()
+
+        result = estimator._get_ebs_gb_month_price("gp3", "us-east-1")
+
+        assert result is None  # empty PriceList -> no price -> fallback in estimator
+        # First call should use the precise volumeApiName filter
+        first_filters = {f["Field"]: f["Value"] for f in captured_calls[0]}
+        assert first_filters["volumeApiName"] == "gp3"
+
+    def test_ec2_unknown_type_uses_fallback_constant(self, monkeypatch):
+        """Test unknown EC2 instance types use DEFAULT_EC2_FALLBACK."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "EC2", "id": "i-1", "instance_type": "x2gd.metal"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == estimator.DEFAULT_EC2_FALLBACK
+
+
+class TestPricingOverrideMerge:
+    """Test partial PRICING_JSON overrides deep-merge over defaults."""
+
+    def test_partial_override_keeps_other_keys(self, monkeypatch):
+        """Test partial override doesn't wipe untouched keys."""
+        import json
+
+        monkeypatch.setenv("PRICING_JSON", json.dumps({"EBS": 1.0}))
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "EC2", "id": "i-1", "instance_type": "t3.micro"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        # EC2 default still present -> $8.50/mo
+        assert estimated[0]["monthly_cost"] == 8.50
+
+    def test_invalid_json_falls_back_to_defaults(self, monkeypatch):
+        """Test malformed PRICING_JSON falls back to defaults without crashing."""
+        monkeypatch.setenv("PRICING_JSON", "{not valid json")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "EBS", "id": "vol-1", "size_gb": 10},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == 1.0
+
+
+class TestEipSnapshotPricing:
+    """Test EIP and SNAPSHOT resource pricing (A1/A2)."""
+
+    def test_eip_flat_price(self, monkeypatch):
+        """Test unattached EIPs use flat monthly price."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "EIP", "id": "eip-1"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert len(estimated) == 1
+        assert estimated[0]["monthly_cost"] == estimator.DEFAULT_PRICING["EIP"]
+        assert total == round(estimator.DEFAULT_PRICING["EIP"], 2)
+
+    def test_snapshot_price_by_size(self, monkeypatch):
+        """Test snapshot cost scales with size_gb."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "SNAPSHOT", "id": "snap-1", "size_gb": 100},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        expected = 100 * estimator.DEFAULT_PRICING["SNAPSHOT"]
+        assert estimated[0]["monthly_cost"] == round(expected, 2)
+        assert total == round(expected, 2)
+
+    def test_snapshot_missing_size_defaults_zero(self, monkeypatch):
+        """Test snapshot without size_gb costs nothing rather than crashing."""
+        monkeypatch.setenv("PRICING_MODE", "static")
+        estimator._PRICE_CACHE.clear()
+
+        resources = [
+            {"type": "SNAPSHOT", "id": "snap-1"},
+        ]
+
+        estimated, total = estimator.estimate_monthly_waste(resources)
+
+        assert estimated[0]["monthly_cost"] == 0

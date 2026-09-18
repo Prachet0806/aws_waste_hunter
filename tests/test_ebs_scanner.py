@@ -2,12 +2,16 @@ import scanner.ebs_scanner as ebs_scanner
 
 
 class FakeEC2Client:
-    def __init__(self, volumes_data):
+    def __init__(self, volumes_data, instances_data=None):
         self.volumes_data = volumes_data
+        self.instances_data = instances_data or []
 
     def get_paginator(self, name):
-        assert name == "describe_volumes"
-        return FakePaginator(self.volumes_data)
+        if name == "describe_volumes":
+            return FakePaginator(self.volumes_data)
+        if name == "describe_instances":
+            return FakePaginator(self.instances_data)
+        raise AssertionError(f"unexpected paginator {name}")
 
 
 class FakePaginator:

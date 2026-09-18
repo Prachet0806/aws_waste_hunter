@@ -37,12 +37,22 @@ class FakeClassicElbPaginator:
 
 
 class FakeClassicElbClient:
-    def __init__(self, lbs_data):
+    def __init__(self, lbs_data, tags_map=None):
         self.lbs_data = lbs_data
+        self.tags_map = tags_map or {}
+        self.tag_calls = []
 
     def get_paginator(self, name):
         assert name == "describe_load_balancers"
         return FakeClassicElbPaginator(self.lbs_data)
+
+    def describe_tags(self, LoadBalancerNames=None):
+        self.tag_calls.append(LoadBalancerNames)
+        tag_descriptions = []
+        for name in LoadBalancerNames:
+            tags = self.tags_map.get(name, [])
+            tag_descriptions.append({"LoadBalancerName": name, "Tags": tags})
+        return {"TagDescriptions": tag_descriptions}
 
 
 class FakeCloudwatchClient:
@@ -91,7 +101,8 @@ def test_scan_unused_elb_alb_with_tags(monkeypatch):
     
     fake_elbv2 = FakeElbV2Client(lbs_data, tags_map)
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
-    fake_cw = FakeCloudwatchClient({})  # No metrics = unused
+    # Explicit zero traffic = unused (fail-open: empty/missing datapoints now skip).
+    fake_cw = FakeCloudwatchClient({"AWS/ApplicationELB:RequestCount:app/my-alb/abc123": [0]})
     
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
@@ -121,7 +132,7 @@ def test_scan_unused_elb_nlb(monkeypatch):
     
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
-    fake_cw = FakeCloudwatchClient({})
+    fake_cw = FakeCloudwatchClient({"AWS/NetworkELB:ProcessedBytes:net/my-nlb/xyz789": [0]})
     
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
@@ -138,7 +149,7 @@ def test_scan_unused_elb_nlb(monkeypatch):
 
 
 def test_scan_unused_elb_classic(monkeypatch):
-    """Test Classic Load Balancer scanning."""
+    """Test Classic Load Balancer scanning with tag fetching."""
     classic_lbs_data = [{
         "LoadBalancerDescriptions": [{
             "LoadBalancerName": "my-classic-lb",
@@ -146,11 +157,19 @@ def test_scan_unused_elb_classic(monkeypatch):
             "AvailabilityZones": ["eu-west-1a", "eu-west-1b"],
         }]
     }]
-    
+
+    tags_map = {
+        "my-classic-lb": [
+            {"Key": "owner", "Value": "sre"},
+            {"Key": "env", "Value": "prod"}
+        ]
+    }
+
     fake_elbv2 = FakeElbV2Client([{"LoadBalancers": []}])
-    fake_elb = FakeClassicElbClient(classic_lbs_data)
-    fake_cw = FakeCloudwatchClient({})
-    
+    fake_elb = FakeClassicElbClient(classic_lbs_data, tags_map)
+    # Explicit zero RequestCount = unused (fail-open: missing datapoints now skip).
+    fake_cw = FakeCloudwatchClient({"AWS/ELB:RequestCount:my-classic-lb": [0]})
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -161,7 +180,7 @@ def test_scan_unused_elb_classic(monkeypatch):
     assert results[0]["id"] == "my-classic-lb"
     assert results[0]["lb_type"] == "CLASSIC"
     assert results[0]["region"] == "eu-west-1"
-    assert results[0]["tags"] == {}  # Classic doesn't support tags via API
+    assert results[0]["tags"]["owner"] == "sre"
     assert fake_cw.calls[0]["namespace"] == "AWS/ELB"
 
 
@@ -187,7 +206,7 @@ def test_scan_unused_elb_filters_used(monkeypatch):
     }]
     
     metrics_map = {
-        "AWS/ApplicationELB:RequestCount:app/unused/abc": [],  # No traffic
+        "AWS/ApplicationELB:RequestCount:app/unused/abc": [0],  # No traffic
         "AWS/ApplicationELB:RequestCount:app/used/def": [1000, 2000]  # Has traffic
     }
     
@@ -248,7 +267,7 @@ def test_scan_unused_elb_empty_azs(monkeypatch):
     
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
-    fake_cw = FakeCloudwatchClient({})
+    fake_cw = FakeCloudwatchClient({"AWS/ApplicationELB:RequestCount:app/no-az/abc": [0]})
     
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
@@ -260,3 +279,57 @@ def test_scan_unused_elb_empty_azs(monkeypatch):
     assert len(results) == 1
     assert results[0]["az"] == ""
     assert results[0]["region"] is None
+
+
+def test_scan_unused_elb_skips_brand_new(monkeypatch):
+    """Test that LBs created within the scan window are not flagged as unused."""
+    from datetime import datetime, timezone
+
+    lbs_data = [{
+        "LoadBalancers": [{
+            "LoadBalancerName": "new-alb",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/new-alb/abc",
+            "Type": "application",
+            "Scheme": "internet-facing",
+            "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+            "CreatedTime": datetime.now(timezone.utc),
+        }]
+    }]
+
+    fake_elbv2 = FakeElbV2Client(lbs_data, {})
+    fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
+    fake_cw = FakeCloudwatchClient({})  # No metrics would normally mean "unused"
+
+    monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
+    monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
+    monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
+
+    results = elb_scanner.scan_unused_elb()
+
+    assert len(results) == 0
+
+
+def test_scan_unused_elb_classic_batch_tags(monkeypatch):
+    """Test batch tag fetching for Classic LBs by name."""
+    classic_lbs_data = [{
+        "LoadBalancerDescriptions": [
+            {"LoadBalancerName": f"classic-{i}", "Scheme": "internet-facing",
+             "AvailabilityZones": ["us-east-1a"]}
+            for i in range(25)  # 25 Classic LBs to test batching (2 API calls)
+        ]
+    }]
+
+    fake_elbv2 = FakeElbV2Client([{"LoadBalancers": []}])
+    fake_elb = FakeClassicElbClient(classic_lbs_data, {})
+    fake_cw = FakeCloudwatchClient({f"AWS/ELB:RequestCount:classic-{i}": [0] for i in range(25)})
+
+    monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
+    monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
+    monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
+
+    results = elb_scanner.scan_unused_elb()
+
+    assert len(results) == 25
+    assert len(fake_elb.tag_calls) == 2
+    assert len(fake_elb.tag_calls[0]) == 20
+    assert len(fake_elb.tag_calls[1]) == 5

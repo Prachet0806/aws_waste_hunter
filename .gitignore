@@ -3,7 +3,6 @@
 venv/
 env/
 __pycache__/
-__pytest_cache__/
 *.pyc
 *.pyo
 *.pyd

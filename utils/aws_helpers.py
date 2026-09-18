@@ -1,51 +1,186 @@
 # utils/aws_helpers.py
-import boto3
 import logging
+import re
+import threading
+
 from botocore.config import Config
 
 logger = logging.getLogger(__name__)
 
-# Boto3 config with retries and timeouts
+# Boto3 config tuned for Lambda: bounded retries/timeouts so a hung
+# dependency cannot burn the whole invocation. Adaptive retry with a
+# modest read timeout; callers add their own overall timeout via futures.
 BOTO3_CONFIG = Config(
-    retries={"max_attempts": 10, "mode": "adaptive"},
+    retries={"max_attempts": 5, "mode": "adaptive"},
     connect_timeout=5,
-    read_timeout=60,
+    read_timeout=10,
+    max_pool_connections=20,
 )
+
+_REGION_RE = re.compile(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$")
+
+
+def resolve_region(explicit=None):
+    """Resolve AWS region with safe fallbacks (never return empty string)."""
+    import os
+
+    region = explicit or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        return None
+    region = str(region).strip()
+    return region or None
 
 
 def get_region_from_az(az):
-    """Extract region from availability zone, handling Local Zones and Wavelength."""
+    """Extract region from availability zone, handling Local Zones, Wavelength, and Outposts."""
+    if not az or not isinstance(az, str):
+        return None
+
+    az = az.strip().lower()
     if not az:
         return None
-    
-    # Local Zone format: us-east-1-bos-1a (4+ parts)
-    # Wavelength format: us-east-1-wl1-bos-wlz-1 (6+ parts)
-    # Standard format: us-east-1a (3 parts with zone letter at end)
-    
+
+    # Standard AZ:      us-east-1a            -> us-east-1
+    # GovCloud/ISO:     us-gov-west-1a        -> us-gov-west-1
+    # Local Zone:       us-east-1-bos-1a      -> us-east-1
+    # Wavelength:       us-east-1-wl1-bos-wlz-1 -> us-east-1
+
     parts = az.split("-")
-    
-    if len(parts) > 3:
-        # Local Zone or Wavelength - region is first 3 parts
-        return "-".join(parts[:3])
-    elif len(parts) == 3:
-        # Standard AZ - need to remove zone letter from last part
-        # us-east-1a -> ["us", "east", "1a"] -> "us-east-1"
-        last_part = parts[2]
-        # Remove trailing letter if present (zone identifier)
-        if last_part and last_part[-1].isalpha():
-            last_part = last_part[:-1]
-        return f"{parts[0]}-{parts[1]}-{last_part}"
+
+    # The region is everything up to and including the first segment that
+    # begins with a digit (the region's numeric component). A trailing zone
+    # letter on that segment (e.g. "1a") is stripped.
+    region_parts = []
+    for part in parts:
+        region_parts.append(part)
+        if part and part[0].isdigit():
+            break
     else:
-        # Malformed or too short
-        return az
+        # No numeric segment found: not a valid AZ.
+        logger.debug(f"get_region_from_az: unrecognized AZ format: {az!r}")
+        return None
+
+    if len(region_parts) < 2:
+        return None
+
+    last = region_parts[-1]
+    if last and last[0].isdigit() and last[-1].isalpha():
+        region_parts[-1] = last[:-1]
+
+    region = "-".join(region_parts)
+    if not _REGION_RE.match(region):
+        logger.debug(f"get_region_from_az: parsed invalid region {region!r} from {az!r}")
+        return None
+    return region
 
 
 def safe_get_first(items, default=None):
-    """Safely get first item from list."""
-    return items[0] if items else default
+    """Safely get first item from a list/tuple; return default otherwise."""
+    if items is None:
+        return default
+    if isinstance(items, dict):
+        logger.debug("safe_get_first called with dict, returning default")
+        return default
+    try:
+        if isinstance(items, (list, tuple)):
+            return items[0] if items else default
+        # Generic iterable (not generator-consuming promise): try iterator.
+        iterator = iter(items)
+        try:
+            return next(iterator)
+        except StopIteration:
+            return default
+    except TypeError:
+        return default
 
 
 def chunk_list(items, size):
     """Split list into chunks of specified size."""
+    if items is None:
+        raise ValueError("chunk_list: items must not be None")
+    if size is None or not isinstance(size, int) or size <= 0:
+        raise ValueError(f"chunk_list: size must be a positive int, got {size!r}")
+    if not hasattr(items, "__len__") or not hasattr(items, "__getitem__"):
+        raise ValueError("chunk_list: items must be a sized sliceable sequence")
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def normalize_tags(raw_tags, source=""):
+    """Normalize AWS tag representations to a plain {key: value} dict.
+
+    Accepts dicts, [{Key,Value}], [{key,value}], [{k,v}] shapes.
+    Never raises: malformed entries are skipped with a debug log.
+    """
+    if not raw_tags:
+        return {}
+    if isinstance(raw_tags, dict):
+        out = {}
+        for k, v in raw_tags.items():
+            try:
+                out[str(k)] = str(v) if v is not None else ""
+            except Exception:
+                logger.debug(f"normalize_tags: skipping bad entry in {source}")
+        return out
+    if isinstance(raw_tags, (list, tuple)):
+        out = {}
+        for t in raw_tags:
+            if not isinstance(t, dict):
+                continue
+            key = t.get("Key", t.get("key", t.get("k")))
+            value = t.get("Value", t.get("value", t.get("v", "")))
+            if key is None:
+                continue
+            try:
+                out[str(key)] = str(value) if value is not None else ""
+            except Exception:
+                continue
+        return out
+    logger.debug(f"normalize_tags: unexpected type {type(raw_tags)} in {source}")
+    return {}
+
+
+class NoMetricsCounter:
+    """Thread-safe counter for fail-open skips due to missing/errored metrics."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._count = 0
+        self._ids = []
+
+    def record(self, resource_id, reason, exc=None):
+        with self._lock:
+            self._count += 1
+            if resource_id:
+                self._ids.append(str(resource_id))
+        if exc is not None:
+            logger.warning(f"Fail-open skip {resource_id}: {reason}: {exc}")
+        else:
+            logger.warning(f"Fail-open skip {resource_id}: {reason}")
+
+    def count(self):
+        with self._lock:
+            return self._count
+
+    def ids(self):
+        with self._lock:
+            return list(self._ids)
+
+    def reset(self):
+        with self._lock:
+            self._count = 0
+            self._ids = []
+
+
+# Process-wide counter shared by scanners for Lambda summary.
+GLOBAL_NO_METRICS = NoMetricsCounter()
+
+
+def log_and_skip(resource_id, reason, exc=None):
+    """Fail-open helper: log a warning and record a metrics-skip (Decision 1)."""
+    GLOBAL_NO_METRICS.record(resource_id, reason, exc)
+    return None
+
+
+def reset_no_metrics():
+    GLOBAL_NO_METRICS.reset()

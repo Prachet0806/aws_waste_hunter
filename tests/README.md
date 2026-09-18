@@ -6,21 +6,30 @@ This directory contains comprehensive tests for the AWS Waste Hunter project.
 
 ```
 tests/
-├── test_ebs_scanner.py          # EBS volume scanning tests
-├── test_ec2_scanner.py          # EC2 instance scanning tests
-├── test_elb_scanner.py          # Load balancer scanning tests (ALB/NLB/Classic)
-├── test_rds_scanner.py          # RDS cluster/instance scanning tests
-├── test_estimator.py            # Basic cost estimation tests
-├── test_estimator_advanced.py   # Advanced estimator tests (cache, dedup, etc.)
-├── test_tag_checker.py          # Basic tag compliance tests
-├── test_compliance_advanced.py  # Advanced compliance tests
-├── test_lambda_handler.py       # Basic handler tests
+├── conftest.py                      # Path guard + autouse fixtures (threshold/cache/env isolation)
+├── test_ebs_scanner.py              # EBS volume scanning tests
+├── test_ec2_scanner.py              # EC2 instance scanning tests
+├── test_elb_scanner.py              # Load balancer scanning tests (ALB/NLB/Classic)
+├── test_rds_scanner.py              # Stopped RDS cluster/instance scanning tests
+├── test_rds_idle_scanner.py         # Idle RDS scanning tests (CPU + connections)
+├── test_eip_scanner.py              # Unattached Elastic IP scanning tests
+├── test_snapshot_scanner.py         # Orphaned snapshot scanning tests
+├── test_estimator.py                # Basic cost estimation tests
+├── test_estimator_advanced.py       # Advanced estimator tests (cache, dedup, etc.)
+├── test_estimator_pricing.py        # Pricing override tests (PRICING_JSON/PRICING_FILE)
+├── test_tag_checker.py              # Basic tag compliance tests
+├── test_compliance_advanced.py      # Advanced compliance tests
+├── test_lambda_handler.py           # Basic handler tests
 ├── test_lambda_handler_integration.py  # Full integration tests
-├── test_aws_helpers.py          # Helper function tests
-├── test_logging.py              # Logging configuration tests
-├── test_report_builder.py       # Report generation tests
-└── test_delivery.py             # SNS/S3 delivery tests
+├── test_aws_helpers.py              # Helper function tests
+├── test_logging.py                  # Logging configuration tests
+├── test_report_builder.py           # Report generation tests
+├── test_delivery.py                 # SNS/S3 delivery failure-path tests
+├── test_delivery_happy.py           # SNS/S3 happy-path + truncation tests
+└── test_phase_fixes.py              # Regression tests for fail-open, pricing cache, schema
 ```
+
+Total: **152 tests, all passing** (~73% total coverage; live-AWS paths excluded from mocks).
 
 ## Running Tests
 
@@ -48,9 +57,9 @@ pip install -r requirements.txt
 pytest
 ```
 
-**Run with coverage:**
+**Run with coverage (settings in `.coveragerc`):**
 ```bash
-pytest --cov --cov-report=html --cov-report=term
+pytest --cov=. --cov-report=html --cov-report=term-missing
 ```
 
 **Run specific test file:**
@@ -85,7 +94,7 @@ Target coverage: **>80%**
 View coverage report:
 ```bash
 # Generate HTML report
-pytest --cov --cov-report=html
+pytest --cov=. --cov-report=html
 
 # Open in browser (Linux/Mac)
 open htmlcov/index.html
@@ -102,19 +111,32 @@ Test individual functions and modules in isolation:
 - `test_ec2_scanner.py`
 - `test_elb_scanner.py`
 - `test_rds_scanner.py`
+- `test_rds_idle_scanner.py`
+- `test_eip_scanner.py`
+- `test_snapshot_scanner.py`
 - `test_aws_helpers.py`
 - `test_estimator.py`
+- `test_estimator_pricing.py`
 - `test_tag_checker.py`
+- `test_report_builder.py`
+- `test_logging.py`
 
 ### Integration Tests
 Test complete workflows:
-- `test_lambda_handler_integration.py` - Full handler execution
-- `test_delivery.py` - End-to-end delivery
+- `test_lambda_handler_integration.py` - Full handler execution (ok/partial/failed)
+- `test_delivery.py` - SNS/S3 failure paths (missing env)
+- `test_delivery_happy.py` - SNS/S3 happy paths, SNS 256KB truncation, S3 key/SSE behavior
 
 ### Advanced Tests
 Test edge cases and complex scenarios:
 - `test_estimator_advanced.py` - Caching, deduplication, TTL
-- `test_compliance_advanced.py` - Custom tag policies
+- `test_compliance_advanced.py` - Custom tag policies, compliance scoring stats
+- `test_phase_fixes.py` - Fail-open skips, live→static fallback isolation, report invariants
+
+### Shared Fixtures
+- `conftest.py` - Autouse per-test isolation: resets scanner thresholds and
+  no-metrics state, clears the price cache, and guards `sys.path` against duplicates.
+  Use `static_pricing` / `default_tags` fixtures where tests need deterministic env.
 
 ## Writing New Tests
 
@@ -227,13 +249,13 @@ def test_feature(monkeypatch):
     pytest --cov --cov-report=xml
     
 - name: Upload coverage
-  uses: codecov/codecov-action@v3
+  uses: codecov/codecov-action@v4
 ```
 
 ### Pre-commit Hook
 ```bash
 #!/bin/bash
-pytest --cov --cov-report=term --cov-fail-under=80
+pytest --cov=. --cov-report=term-missing --cov-fail-under=80
 ```
 
 ## Test Data

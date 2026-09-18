@@ -6,19 +6,20 @@ from setuptools import setup, find_packages
 
 setup(
     name="aws-waste-hunter",
-    version="1.0.0",
+    version="2.1.0",
     description="AWS FinOps automation bot for waste detection",
     packages=find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.9",
     install_requires=[
-        "boto3",
-        "jinja2",
+        "boto3>=1.34,<2",
+        "botocore>=1.34,<2",
+        "jinja2>=3.1,<4",
     ],
     extras_require={
         "dev": [
-            "pytest",
-            "pytest-cov",
-            "pytest-mock",
+            "pytest>=8,<9",
+            "pytest-cov>=5,<7",
+            "pytest-mock>=3,<4",
         ],
     },
 )

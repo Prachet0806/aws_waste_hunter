@@ -26,14 +26,11 @@ class TestLoggingSetup:
 
     def test_logger_format(self):
         """Test that logger has correct format."""
-        logger = setup_logging()
-        
-        handler = logger.handlers[0]
-        formatter = handler.formatter
-        assert formatter is not None
-        
-        # Check format contains expected components
-        format_str = formatter._fmt
+        logger = setup_logging(force=True)
+
+        formats = [h.formatter._fmt for h in logger.handlers if h.formatter]
+        assert any("%(asctime)s" in f for f in formats)
+        format_str = next(f for f in formats if "%(asctime)s" in f)
         assert "%(asctime)s" in format_str
         assert "%(name)s" in format_str
         assert "%(levelname)s" in format_str
