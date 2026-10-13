@@ -220,7 +220,7 @@ def test_scan_stopped_rds_empty_azs(monkeypatch):
     # Should not crash
     assert len(results) == 1
     assert results[0]["az"] == ""
-    assert results[0]["region"] is None
+    assert results[0]["region"] == "us-east-1"
 
 
 def test_scan_stopped_rds_pagination(monkeypatch):

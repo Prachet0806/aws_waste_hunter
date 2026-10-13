@@ -25,16 +25,11 @@ class TestLoggingSetup:
         assert has_stream_handler
 
     def test_logger_format(self):
-        """Test that logger has correct format."""
-        logger = setup_logging(force=True)
-
-        formats = [h.formatter._fmt for h in logger.handlers if h.formatter]
-        assert any("%(asctime)s" in f for f in formats)
-        format_str = next(f for f in formats if "%(asctime)s" in f)
-        assert "%(asctime)s" in format_str
-        assert "%(name)s" in format_str
-        assert "%(levelname)s" in format_str
-        assert "%(message)s" in format_str
+        from utils.logging_config import JsonFormatter
+        import json
+        record = logging.LogRecord("test", logging.INFO, "", 0, "hello", (), None)
+        result = json.loads(JsonFormatter().format(record))
+        assert result["level"] == "INFO" and result["message"] == "hello"
 
     def test_multiple_calls_idempotent(self):
         """Test that calling setup_logging multiple times doesn't create duplicate handlers."""

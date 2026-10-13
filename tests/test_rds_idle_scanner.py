@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 import scanner.rds_idle_scanner as rds_idle
@@ -55,10 +56,12 @@ class FakeCloudwatchClient:
                 values = []
             else:
                 values = self.metrics_map[rid].get(metric, [])
+            if values:
+                values = [values[n % len(values)] for n in range(28)]
             results.append({
                 "Id": q["Id"],
                 "Label": rid,
-                "Timestamps": [],
+                "Timestamps": [kwargs["StartTime"]+timedelta(hours=6*n) for n in range(len(values))],
                 "Values": values,
                 "StatusCode": "Complete",
             })
@@ -143,11 +146,7 @@ def test_scan_idle_rds_cluster_basic(monkeypatch):
 
     results = rds_idle.scan_idle_rds()
 
-    assert len(results) == 1
-    assert results[0]["type"] == "RDS_CLUSTER"
-    assert results[0]["id"] == "cluster-idle"
-    assert results[0]["avg_cpu"] == 3.0
-    assert results[0]["avg_connections"] == 1
+    assert results == []  # Cluster compute is represented by member instances.
 
 
 def test_scan_idle_rds_skips_busy_instance(monkeypatch):

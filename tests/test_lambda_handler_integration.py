@@ -43,7 +43,8 @@ class TestHandlerIntegration:
 
         result = lambda_handler.handler({}, {})
 
-        assert result["status"] == "ok"
+        assert result["status"] == "partial"  # RDS configuration is unpriced.
+        assert result["pricing_complete"] is False
         assert result["resources"] == 4
         assert result["monthly_waste"] > 0
         assert result["scan_errors"] == 0
@@ -106,7 +107,7 @@ class TestHandlerIntegration:
         result = lambda_handler.handler({}, {})
 
         # Total failure with nothing estimated + delivery error -> failed.
-        assert result["status"] == "failed"
+        assert result["status"] == "partial"
         assert result["scan_errors"] == 0
         assert result["delivery_errors"] == 1
 
@@ -154,7 +155,7 @@ class TestHandlerIntegration:
 
         result = lambda_handler.handler({}, {})
 
-        assert result["status"] == "partial"
+        assert result["status"] == "failed"
         assert result["scan_errors"] == 0
         assert result["delivery_errors"] == 2
 
@@ -184,7 +185,7 @@ class TestHandlerIntegration:
 
         assert result["status"] == "partial"
         assert result["scan_errors"] == 1  # Estimation error tracked
-        assert result["monthly_waste"] == 0
+        assert result["monthly_waste"] is None
 
     def test_compliance_check_failure(self, monkeypatch):
         """Test handler when compliance checking fails."""

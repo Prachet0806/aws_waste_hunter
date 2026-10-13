@@ -21,8 +21,8 @@ def test_handler_partial_on_scan_error(monkeypatch):
 
     _mock_all_scanners(monkeypatch, good_scan, bad_scan=bad_scan)
 
-    monkeypatch.setattr(lambda_handler, "send_report", lambda report: None)
-    monkeypatch.setattr(lambda_handler, "archive_report", lambda report: None)
+    monkeypatch.setattr(lambda_handler, "send_report", lambda report, result=None: None)
+    monkeypatch.setattr(lambda_handler, "archive_report", lambda report, result=None: None)
 
     result = lambda_handler.handler({}, {})
 
@@ -40,7 +40,7 @@ def test_handler_partial_on_delivery_error(monkeypatch):
     _mock_all_scanners(monkeypatch, good_scan)
 
     monkeypatch.setattr(lambda_handler, "send_report", bad_delivery)
-    monkeypatch.setattr(lambda_handler, "archive_report", lambda report: None)
+    monkeypatch.setattr(lambda_handler, "archive_report", lambda report, result=None: None)
 
     result = lambda_handler.handler({}, {})
 
@@ -56,8 +56,8 @@ def test_handler_high_waste_alert(monkeypatch):
     _mock_all_scanners(monkeypatch, big_scan)
     monkeypatch.setenv("PRICING_MODE", "static")
     monkeypatch.setenv("WASTE_ALERT_THRESHOLD", "100")
-    monkeypatch.setattr(lambda_handler, "send_report", lambda report: None)
-    monkeypatch.setattr(lambda_handler, "archive_report", lambda report: None)
+    monkeypatch.setattr(lambda_handler, "send_report", lambda report, result=None: None)
+    monkeypatch.setattr(lambda_handler, "archive_report", lambda report, result=None: None)
 
     # 6 scanners each return 1 EIP = 6 * $3.60 = $21.60, below threshold
     result = lambda_handler.handler({}, {})

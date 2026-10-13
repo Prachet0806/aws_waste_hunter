@@ -144,7 +144,8 @@ def test_report_truncates_large_tables():
     big = [{"type": "EBS", "id": f"vol-{i}", "monthly_cost": 1.0,
             "az": "us-east-1a", "region": "us-east-1", "tags": {}} for i in range(600)]
     out = build_report(big, 600.0, [], [], [], {})
-    assert "more rows in full S3 archive" in out
+    assert "vol-599" in out
+    assert "more rows in full S3 archive" not in out
 
 
 def test_tag_checker_empty_env_falls_back(monkeypatch):
@@ -167,4 +168,4 @@ def test_waste_threshold_rejects_inf(monkeypatch):
 def test_overall_status_failed_only_on_total_failure():
     assert lambda_handler._overall_status([], [], []) == "ok"
     assert lambda_handler._overall_status([{"stage": "x"}], [], [{"id": 1}]) == "partial"
-    assert lambda_handler._overall_status([], [{"stage": "d"}], []) == "failed"
+    assert lambda_handler._overall_status([], [{"stage": "d"}], []) == "partial"

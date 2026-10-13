@@ -223,8 +223,8 @@ class TestEdgeCases:
 
         violations = tag_checker.check_tag_compliance(resources)
 
-        # Key exists, so no violation
-        assert len(violations) == 0
+        # Empty ownership is a violation.
+        assert len(violations) == 1
 
 
 class TestComplianceStats:
@@ -269,7 +269,7 @@ class TestComplianceStats:
         stats = tag_checker.compute_compliance_stats([])
 
         assert stats["total"] == 0
-        assert stats["percent"] == 0.0
+        assert stats["percent"] is None
         assert stats["by_type"] == {}
         assert stats["missing_counts"] == {}
 

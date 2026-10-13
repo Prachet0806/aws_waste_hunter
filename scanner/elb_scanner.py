@@ -1,3 +1,4 @@
+from utils.scan_context import CURRENT, record_error, protected
 # scanner/elb_scanner.py
 import logging
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,8 @@ _cloudwatch_client = None
 
 def _get_elbv2_client():
     """Lazy initialization of ELBv2 client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("elbv2")
     global _elbv2_client
     if _elbv2_client is None:
         _elbv2_client = get_client("elbv2")
@@ -29,6 +32,8 @@ def _get_elbv2_client():
 
 def _get_elb_client():
     """Lazy initialization of ELB (Classic) client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("elb")
     global _elb_client
     if _elb_client is None:
         _elb_client = get_client("elb")
@@ -37,6 +42,8 @@ def _get_elb_client():
 
 def _get_cloudwatch_client():
     """Lazy initialization of CloudWatch client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("cloudwatch")
     global _cloudwatch_client
     if _cloudwatch_client is None:
         _cloudwatch_client = get_client("cloudwatch")
@@ -155,20 +162,36 @@ def _check_alb_nlb_usage(lb, lb_type, start, end):
         log_and_skip(lb_name, "get_metric_statistics error", e)
         return None
 
-    datapoints = metrics.get("Datapoints") if isinstance(metrics, dict) else None
-    if not datapoints:
-        log_and_skip(lb_name, "no CloudWatch datapoints")
-        return None
-
+    from utils.metrics import statistics
+    evidence = statistics(metrics, start, end)
+    if evidence["total"] and evidence["total"] > 0:
+        return False
     try:
-        total = sum(float(d.get("Sum", 0) or 0) for d in datapoints)
-    except (TypeError, ValueError):
-        log_and_skip(lb_name, "malformed datapoints")
+        corroboration = cloudwatch.get_metric_statistics(
+            Namespace=namespace, MetricName="ProcessedBytes" if lb_type_norm == "application" else "NewFlowCount",
+            Dimensions=[{"Name": "LoadBalancer", "Value": metric_dimension}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"])
+        other = statistics(corroboration, start, end)
+        if other["total"] and other["total"] > 0:
+            return False
+        if evidence["complete"] and other["complete"]:
+            lb["usage_evidence"] = "complete-zero-traffic"
+            return True
+        # Sparse metrics require independent structural evidence, never a zero fill.
+        elbv2 = _get_elbv2_client()
+        listeners = list(elbv2.get_paginator("describe_listeners").paginate(LoadBalancerArn=lb["LoadBalancerArn"]))
+        targets = list(elbv2.get_paginator("describe_target_groups").paginate(LoadBalancerArn=lb["LoadBalancerArn"]))
+        if not any(p.get("Listeners") for p in listeners) and not any(p.get("TargetGroups") for p in targets):
+            lb["usage_evidence"] = "no-listeners-or-target-groups-review-dependencies"
+            return True
+    except Exception as exc:
+        log_and_skip(lb_name, "unable to corroborate sparse LB metrics", exc)
         return None
-    return total == 0
+    log_and_skip(lb_name, "insufficient LB traffic coverage")
+    return None
 
 
-def _check_classic_lb_usage(lb_name, created, start, end):
+def _check_classic_lb_usage(lb_name, created, start, end, lb=None):
     """Check if Classic LB has received traffic. Fail-open: None on skip."""
     cloudwatch = _get_cloudwatch_client()
 
@@ -195,17 +218,19 @@ def _check_classic_lb_usage(lb_name, created, start, end):
         log_and_skip(lb_name, "get_metric_statistics error", e)
         return None
 
-    datapoints = metrics.get("Datapoints") if isinstance(metrics, dict) else None
-    if not datapoints:
-        log_and_skip(lb_name, "no CloudWatch datapoints")
-        return None
-
-    try:
-        total = sum(float(d.get("Sum", 0) or 0) for d in datapoints)
-    except (TypeError, ValueError):
-        log_and_skip(lb_name, "malformed datapoints")
-        return None
-    return total == 0
+    from utils.metrics import statistics
+    evidence = statistics(metrics, start, end)
+    if evidence["total"] and evidence["total"] > 0:
+        return False
+    if lb and "Instances" in lb and not lb["Instances"]:
+        lb["usage_evidence"] = "no-registered-instances-review-dependencies"
+        return True
+    # RequestCount does not cover every Classic listener protocol.
+    if evidence["complete"] and lb and all(d.get("Listener", {}).get("Protocol") in ("HTTP", "HTTPS")
+                                           for d in lb.get("ListenerDescriptions", [])):
+        return True
+    log_and_skip(lb_name, "insufficient Classic LB evidence")
+    return None
 
 
 def _az_name_from_v2(lb):
@@ -253,7 +278,7 @@ def scan_unused_elb():
                 unused.append(build_resource(
                     "ELB", lb["LoadBalancerName"], region=region, az=az_name,
                     arn=lb.get("LoadBalancerArn"),
-                    reason="unused-zero-traffic",
+                    reason=lb.get("usage_evidence", "zero-traffic-review-dependencies"),
                     tags=tag_map.get(lb["LoadBalancerArn"], {}),
                     lb_type=str(lb_type).upper(),
                     scheme=lb.get("Scheme", "") or "",
@@ -275,7 +300,7 @@ def scan_unused_elb():
                 continue
             lb_name = lb["LoadBalancerName"]
 
-            usage = _check_classic_lb_usage(lb_name, lb.get("CreatedTime"), start, now)
+            usage = _check_classic_lb_usage(lb_name, lb.get("CreatedTime"), start, now, lb=lb)
             if usage is True:
                 az_list = lb.get("AvailabilityZones", []) or []
                 first_az = safe_get_first(az_list, "") or ""
@@ -283,7 +308,7 @@ def scan_unused_elb():
                     first_az = ""
                 unused.append(build_resource(
                     "ELB", lb_name, region=get_region_from_az(first_az), az=first_az,
-                    reason="unused-zero-traffic",
+                    reason=lb.get("usage_evidence", "zero-traffic-review-dependencies"),
                     tags=classic_tag_map.get(lb_name, {}),
                     lb_type="CLASSIC",
                     scheme=lb.get("Scheme", "") or "",

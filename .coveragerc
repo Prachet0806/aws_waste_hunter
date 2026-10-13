@@ -1,5 +1,13 @@
 [run]
-source = .
+source =
+    scanner
+    utils
+    cost_engine
+    compliance
+    reporting
+    delivery
+    orchestration
+    lambda_handler
 omit =
     tests/*
     */__pycache__/*

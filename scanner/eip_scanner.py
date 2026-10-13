@@ -1,3 +1,4 @@
+from utils.scan_context import CURRENT, record_error, protected
 # scanner/eip_scanner.py
 import logging
 
@@ -12,6 +13,8 @@ _ec2_client = None
 
 def _get_ec2_client():
     """Lazy initialization of EC2 client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("ec2")
     global _ec2_client
     if _ec2_client is None:
         _ec2_client = get_client("ec2")
@@ -26,9 +29,7 @@ def scan_unattached_eips():
     logger.info("Starting Elastic IP scan")
 
     try:
-        paginator = ec2.get_paginator("describe_addresses")
-
-        for page in paginator.paginate():
+        for page in [ec2.describe_addresses()]:
             for a in ((page or {}).get("Addresses", []) or []):
                 if not isinstance(a, dict):
                     continue

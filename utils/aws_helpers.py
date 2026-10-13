@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # dependency cannot burn the whole invocation. Adaptive retry with a
 # modest read timeout; callers add their own overall timeout via futures.
 BOTO3_CONFIG = Config(
-    retries={"max_attempts": 5, "mode": "adaptive"},
+    retries={"total_max_attempts": 3, "mode": "standard"},
     connect_timeout=5,
     read_timeout=10,
     max_pool_connections=20,
@@ -141,46 +141,38 @@ def normalize_tags(raw_tags, source=""):
 
 
 class NoMetricsCounter:
-    """Thread-safe counter for fail-open skips due to missing/errored metrics."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._count = 0
-        self._ids = []
-
+    """Compatibility facade over context-local state; production uses ScanContext."""
     def record(self, resource_id, reason, exc=None):
-        with self._lock:
-            self._count += 1
-            if resource_id:
-                self._ids.append(str(resource_id))
-        if exc is not None:
-            logger.warning(f"Fail-open skip {resource_id}: {reason}: {exc}")
-        else:
-            logger.warning(f"Fail-open skip {resource_id}: {reason}")
+        from utils.scan_context import CURRENT
+        context = CURRENT.get()
+        if context:
+            context.skip(resource_id, reason)
+            if exc is not None:
+                context.error(reason, exc)
+        logger.warning("Skipped %s: %s", resource_id, reason)
 
     def count(self):
-        with self._lock:
-            return self._count
+        from utils.scan_context import CURRENT
+        context = CURRENT.get()
+        return len(context.skips) if context else 0
 
     def ids(self):
-        with self._lock:
-            return list(self._ids)
+        from utils.scan_context import CURRENT
+        context = CURRENT.get()
+        return [s['resource_id'] for s in context.skips] if context else []
 
     def reset(self):
-        with self._lock:
-            self._count = 0
-            self._ids = []
+        # A scanner must never reset another scanner's evidence.
+        return None
 
 
-# Process-wide counter shared by scanners for Lambda summary.
 GLOBAL_NO_METRICS = NoMetricsCounter()
 
 
 def log_and_skip(resource_id, reason, exc=None):
-    """Fail-open helper: log a warning and record a metrics-skip (Decision 1)."""
     GLOBAL_NO_METRICS.record(resource_id, reason, exc)
     return None
 
 
 def reset_no_metrics():
-    GLOBAL_NO_METRICS.reset()
+    return None

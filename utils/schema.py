@@ -1,43 +1,42 @@
-# utils/schema.py
-"""Normalized waste-resource schema (Decision 3: breaking change allowed).
+"""Version 2 identities and canonical details, with generated legacy mirrors."""
+import math
+from utils.aws_helpers import normalize_tags
 
-Base fields every scanner must return:
-  {type, id, region, az?, arn?, reason, age_days?, tags, details}
 
-- type: EC2 | EBS | EIP | ELB | RDS_CLUSTER | RDS_INSTANCE | SNAPSHOT | RDS_IDLE_*
-- reason: machine-readable cause, e.g. idle-low-cpu-network, unattached,
-  unused-zero-traffic, stopped, idle-low-cpu-connections, orphaned-old-snapshot
-- details: scanner-specific metrics (avg_cpu, size_gb, ...) — keeps base stable.
-- Legacy top-level metric keys (avg_cpu, size_gb, ...) are ALSO kept for
-  estimator/report backward-compat during migration; new code should read
-  details first, then top-level fallback.
-"""
-import logging
+def resource_identity(resource):
+    if resource.get("resource_key"):
+        return resource["resource_key"]
+    if resource.get("arn"):
+        return resource["arn"]
+    return ":".join(str(resource.get(k) or "unknown") for k in
+                    ("partition", "account_id", "region", "type", "id"))
 
-logger = logging.getLogger(__name__)
+
+def field(resource, name, default=None):
+    return (resource.get("details") or {}).get(name, resource.get(name, default))
 
 
 def build_resource(resource_type, resource_id, region=None, az="", arn=None,
                    reason="", age_days=None, tags=None, **details):
-    tags = dict(tags) if tags else {}
-    resource = {
-        "type": resource_type,
-        "id": resource_id,
-        "region": region,
-        "az": az or "",
-        "reason": reason,
-        "tags": tags,
-        "details": dict(details),
-    }
+    from utils.scan_context import CURRENT
+    context = CURRENT.get()
+    resource = {"schema_version": 2, "type": resource_type, "id": resource_id,
+                "region": region or (context.config.region if context else None), "az": az or "",
+                "account_id": context.account_id if context else "unknown", "partition": "aws",
+                "reason": reason, "tags": normalize_tags(tags), "details": dict(details),
+                "confidence": "review", "tags_status": "known"}
     if arn:
         resource["arn"] = arn
+        parts = arn.split(":")
+        if len(parts) >= 6:
+            resource.update(partition=parts[1], account_id=parts[4], region=parts[3])
     if age_days is not None:
         try:
-            resource["age_days"] = float(age_days)
+            value = float(age_days)
+            if math.isfinite(value) and value >= 0:
+                resource["age_days"] = value
         except (TypeError, ValueError):
             pass
-    # Legacy mirror: keep metric keys top-level so estimator/report keep working.
-    for k, v in details.items():
-        if k not in resource:
-            resource[k] = v
+    resource.update({k: v for k, v in details.items() if k not in resource})
+    resource["resource_key"] = resource_identity(resource)
     return resource

@@ -3,8 +3,10 @@ import logging
 import os
 import re
 import uuid
+import math
 
 from utils.aws_factory import get_client
+from utils.scan_context import CURRENT
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,8 @@ SNS_MAX_ATTRS = 10
 
 def _get_sns_client():
     """Lazy initialization of SNS client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("sns", region=_topic_region())
     global _sns_client
     if _sns_client is None:
         region = _topic_region() or None
@@ -29,6 +33,8 @@ def reset_sns_client():
 
 
 def _topic_region():
+    if os.environ.get("SNS_TOPIC_REGION"):
+        return os.environ["SNS_TOPIC_REGION"].strip()
     arn = os.environ.get("SNS_TOPIC_ARN", "")
     m = re.match(r"^arn:aws[a-z-]*:sns:([a-z0-9-]+):", arn or "")
     if m:
@@ -42,12 +48,12 @@ def _safe_number(value):
         num = float(value)
     except (TypeError, ValueError):
         return None
-    if num != num or num in (float("inf"), float("-inf")):
+    if not math.isfinite(num) or abs(num) > 10**9:
         return None
     # SNS Number must be plain decimal without NaN/Inf.
     if num.is_integer():
         return str(int(num))
-    return str(num)
+    return format(num, ".5f").rstrip("0").rstrip(".")
 
 
 def _build_message_attributes(result):
@@ -83,7 +89,7 @@ def _build_message_attributes(result):
         add_number("resource_count", result["resources"])
 
     # High waste flag
-    if "high_waste" in result:
+    if result.get("high_waste") is not None:
         add_string("high_waste", str(bool(result["high_waste"])).lower())
 
     # Compliance percent
@@ -131,17 +137,20 @@ def send_report(report, result=None):
 
     message = report
     encoded = message.encode("utf-8")
-    if len(encoded) > SNS_MAX_BYTES:
+    attrs = _build_message_attributes(result) if result else {}
+    attr_bytes = sum(len(k.encode()) + len(v["DataType"].encode()) + len(v["StringValue"].encode()) for k, v in attrs.items())
+    message_limit = SNS_MAX_BYTES - attr_bytes - 1024
+    if len(encoded) > message_limit:
         s3_hint = os.environ.get("REPORT_BUCKET", "")
         note = f"\n\n[TRUNCATED for SNS 256KB limit; full report in S3 bucket {s3_hint} ]"
-        budget = SNS_MAX_BYTES - len(note.encode("utf-8")) - 64
+        budget = message_limit - len(note.encode("utf-8"))
         truncated = encoded[:max(budget, 0)].decode("utf-8", errors="ignore")
         message = truncated + note
         logger.warning(f"SNS message truncated from {len(encoded)} to {len(message.encode('utf-8'))} bytes")
 
     # Subject must be ASCII-safe-ish and <=100 chars; weekly->generic schedule.
     schedule = os.environ.get("REPORT_SCHEDULE", "Weekly")
-    subject = f"AWS Waste Hunter - {schedule} Cost Optimization Report"[:100]
+    subject = "".join(c for c in f"AWS Waste Hunter - {schedule} Cost Optimization Report" if 32 <= ord(c) < 127)[:99]
 
     publish_params = {
         "TopicArn": topic_arn,

@@ -21,7 +21,7 @@ def _reset_scanner_thresholds():
         ec2_scanner.CPU_THRESHOLD = None
         ec2_scanner.NETWORK_THRESHOLD = None
         if hasattr(ec2_scanner, "_no_metrics_ids"):
-            ec2_scanner._no_metrics_ids = []
+            ec2_scanner.reset_no_metrics_state()
     except Exception:
         pass
 
@@ -29,14 +29,26 @@ def _reset_scanner_thresholds():
 def _clear_price_cache():
     try:
         import cost_engine.estimator as estimator
-        estimator._PRICE_CACHE.clear()
+        estimator.clear_price_cache()
+        estimator.CACHE_TTL = 3600
+        estimator.MAX_CACHE_SIZE = 1000
     except Exception:
         pass
 
 
 @pytest.fixture(autouse=True)
-def _isolate_global_state(monkeypatch):
+def _isolate_global_state(monkeypatch, request):
     """Auto-reset module globals and price cache between tests."""
+    if request.node.get_closest_marker("staging"):
+        yield
+        return
+    monkeypatch.setenv("ACCOUNT_ID", "123456789012")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "audit-dummy")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "audit-dummy")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Unit tests may not access the network")))
     _reset_scanner_thresholds()
     _clear_price_cache()
     yield

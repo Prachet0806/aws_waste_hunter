@@ -1,3 +1,4 @@
+from utils.scan_context import CURRENT, record_error, protected
 # scanner/rds_scanner.py
 import logging
 
@@ -12,6 +13,8 @@ _rds_client = None
 
 def _get_rds_client():
     """Lazy initialization of RDS client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("rds")
     global _rds_client
     if _rds_client is None:
         _rds_client = get_client("rds")
@@ -31,6 +34,7 @@ def _get_batch_tags(arns):
             tags = response.get("TagList", []) or []
             tag_map[arn] = normalize_tags(tags, source=f"rds:{arn}")
         except Exception as e:
+            record_error("rds-tags", e)
             logger.warning(f"Error fetching tags for {arn}: {e}")
             tag_map[arn] = {}
 
@@ -117,6 +121,8 @@ def scan_stopped_rds():
                     tags=instance_tag_map.get(i.get("DBInstanceArn"), {}),
                     engine=i.get("Engine", "") or "",
                     instance_class=i.get("DBInstanceClass", "") or "",
+                    storage_gb=i.get("AllocatedStorage"), storage_type=i.get("StorageType"),
+                    iops=i.get("Iops"), multi_az=i.get("MultiAZ", False),
                 ))
 
         logger.info(f"Found {len(wasted)} stopped RDS resources")

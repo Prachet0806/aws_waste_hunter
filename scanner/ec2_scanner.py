@@ -1,3 +1,5 @@
+from contextvars import ContextVar
+from utils.scan_context import CURRENT, record_error, protected
 # scanner/ec2_scanner.py
 import logging
 import os
@@ -20,7 +22,7 @@ _ec2_client = None
 _cloudwatch_client = None
 
 CPU_THRESHOLD = None
-_no_metrics_ids = []
+_no_metrics_ids = ContextVar("legacy_ec2_skips", default=())
 
 # 6-hour aggregation period for finer sensitivity over the 7-day window
 METRIC_PERIOD = 21600
@@ -36,19 +38,20 @@ NETWORK_THRESHOLD = None
 def get_no_metrics_count():
     """Return the count of instances skipped in the last scan due to missing metrics."""
     try:
-        return len(_no_metrics_ids)
+        return len(_no_metrics_ids.get())
     except Exception:
         return GLOBAL_NO_METRICS.count()
 
 
 def reset_no_metrics_state():
-    global _no_metrics_ids
-    _no_metrics_ids = []
+    _no_metrics_ids.set(())
     reset_no_metrics()
 
 
 def _get_network_threshold():
     """Get network threshold (bytes) from env var with validation."""
+    if CURRENT.get():
+        return CURRENT.get().config.network_threshold
     global NETWORK_THRESHOLD
     if NETWORK_THRESHOLD is None:
         try:
@@ -65,6 +68,8 @@ def _get_network_threshold():
 
 def _get_cpu_threshold():
     """Get CPU threshold from env var with validation."""
+    if CURRENT.get():
+        return CURRENT.get().config.cpu_threshold
     global CPU_THRESHOLD
     if CPU_THRESHOLD is None:
         try:
@@ -81,6 +86,8 @@ def _get_cpu_threshold():
 
 def _get_ec2_client():
     """Lazy initialization of EC2 client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("ec2")
     global _ec2_client
     if _ec2_client is None:
         _ec2_client = get_client("ec2")
@@ -89,6 +96,8 @@ def _get_ec2_client():
 
 def _get_cloudwatch_client():
     """Lazy initialization of CloudWatch client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("cloudwatch")
     global _cloudwatch_client
     if _cloudwatch_client is None:
         _cloudwatch_client = get_client("cloudwatch")
@@ -154,59 +163,17 @@ def _parse_metric_id(metric_id):
 
 
 def _fetch_instance_metrics(cloudwatch, instance_ids, start, end):
-    """
-    Batch-fetch CPU average and network totals for all instances via GetMetricData.
-
-    Fail-open (Decision 1): per-chunk CW errors mark that chunk as no-metrics
-    and are logged; prior chunks' partial results are preserved.
-    Returns {instance_id: {"cpu": float|None, "net_in": float, "net_out": float}}.
-    """
+    from utils.metrics import collect
     results = {}
-
-    # MetricStat limit is 500 per call -> each instance uses 3 queries
     for chunk in chunk_list(instance_ids, MAX_METRIC_QUERIES // 3):
-        queries = _build_metric_queries(chunk)
-        params = {"MetricDataQueries": queries, "StartTime": start, "EndTime": end}
-        next_token = None
-        chunk_failed = False
-
-        while True:
-            if next_token:
-                params["NextToken"] = next_token
-
-            try:
-                response = cloudwatch.get_metric_data(**params)
-            except Exception as e:
-                log_and_skip(f"ec2-chunk({len(chunk)})", "get_metric_data error", e)
-                for iid in chunk:
-                    # Preserve any partial successes already collected for this chunk.
-                    results.setdefault(iid, {"cpu": None, "net_in": 0.0, "net_out": 0.0})
-                chunk_failed = True
-                break
-
-            for mdr in response.get("MetricDataResults", []):
-                metric, idx = _parse_metric_id(mdr.get("Id", ""))
-                if metric is None or idx is None or not (0 <= idx < len(chunk)):
-                    logger.warning(f"Skipping malformed MetricDataResult Id: {mdr.get('Id')!r}")
-                    continue
-                iid = chunk[idx]
-                values = mdr.get("Values", []) or []
-
-                entry = results.setdefault(iid, {"cpu": None, "net_in": 0.0, "net_out": 0.0})
-                if metric == "cpu":
-                    entry["cpu"] = sum(values) / len(values) if values else None
-                elif metric == "netin":
-                    entry["net_in"] = sum(values) if values else 0.0
-                elif metric == "netout":
-                    entry["net_out"] = sum(values) if values else 0.0
-
-            next_token = response.get("NextToken")
-            if not next_token:
-                break
-
-        if chunk_failed:
-            continue
-
+        data = collect(cloudwatch, _build_metric_queries(chunk), start, end, METRIC_PERIOD)
+        for idx, iid in enumerate(chunk):
+            cpu, netin, netout = [data[f"{prefix}_{idx}"] for prefix in ("cpu", "netin", "netout")]
+            valid = all(m["valid"] for m in (cpu, netin, netout))
+            results[iid] = {"cpu": sum(cpu["values"])/len(cpu["values"]) if valid else None,
+                            "net_in": sum(netin["values"]) if valid else None,
+                            "net_out": sum(netout["values"]) if valid else None,
+                            "coverage": min(m["coverage"] for m in (cpu, netin, netout))}
     return results
 
 
@@ -220,7 +187,6 @@ def _is_asg_managed(instance):
 
 def scan_idle_ec2():
     """Scan for idle EC2 instances based on low CPU and negligible network activity."""
-    global _no_metrics_ids
     reset_no_metrics_state()
     ec2 = _get_ec2_client()
     cloudwatch = _get_cloudwatch_client()
@@ -231,7 +197,8 @@ def scan_idle_ec2():
     no_metrics = []
     asg_skipped = []
 
-    now = datetime.now(timezone.utc)
+    from utils.metrics import window_end
+    now = window_end(METRIC_PERIOD)
     start = now - timedelta(days=7)
 
     logger.info(
@@ -244,7 +211,7 @@ def scan_idle_ec2():
         running = []
         try:
             pages = paginator.paginate(
-                Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+
             )
         except TypeError:
             pages = paginator.paginate()
@@ -256,11 +223,17 @@ def scan_idle_ec2():
         # Skip ASG-managed instances (their scaling is handled by the ASG)
         candidates = []
         for i in running:
+            if i.get("State", {}).get("Name") != "running":
+                continue
             if not isinstance(i, dict) or not i.get("InstanceId"):
                 logger.warning("Skipping malformed instance record without InstanceId")
                 continue
+            if protected(normalize_tags(i.get("Tags", []))):
+                log_and_skip(i["InstanceId"], "protected resource")
+                continue
             if _is_asg_managed(i):
                 asg_skipped.append(i["InstanceId"])
+                log_and_skip(i["InstanceId"], "ASG-managed")
             else:
                 candidates.append(i)
 
@@ -272,7 +245,7 @@ def scan_idle_ec2():
             m = metrics_map.get(iid, {"cpu": None, "net_in": 0.0, "net_out": 0.0})
 
             if m.get("cpu") is None:
-                log_and_skip(iid, "no CPU metrics")
+                log_and_skip(iid, "insufficient CPU/network metric coverage")
                 no_metrics.append(iid)
                 continue
 
@@ -286,6 +259,9 @@ def scan_idle_ec2():
                     "EC2", iid, region=region, az=az,
                     reason="idle-low-cpu-network",
                     tags=normalize_tags(i.get("Tags", []), source=f"ec2:{iid}"),
+                    platform=i.get("PlatformDetails", "Linux/UNIX"), tenancy=i.get("Placement", {}).get("Tenancy", "default"),
+                    purchasing="spot" if i.get("InstanceLifecycle") == "spot" else "on-demand",
+                    metric_coverage=m.get("coverage"),
                     avg_cpu=round(m["cpu"], 2),
                     net_in_bytes=round(m.get("net_in") or 0.0, 2),
                     net_out_bytes=round(m.get("net_out") or 0.0, 2),
@@ -300,5 +276,5 @@ def scan_idle_ec2():
         logger.error(f"Error scanning EC2 instances: {e}", exc_info=True)
         raise
 
-    _no_metrics_ids = no_metrics
+    _no_metrics_ids.set(tuple(no_metrics))
     return idle

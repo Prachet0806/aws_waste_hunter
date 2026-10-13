@@ -1,3 +1,4 @@
+from utils.schema import resource_identity
 # compliance/tag_checker.py
 import logging
 import os
@@ -62,13 +63,16 @@ def check_tag_compliance(resources):
     for r in resources:
         if not isinstance(r, dict):
             continue
+        if r.get("tags_status") == "unknown":
+            continue
         tags = _normalize_resource_tags(r.get("tags"))
 
-        missing = [t for t in required_tags if t not in tags]
+        missing = [t for t in required_tags if not str(tags.get(t) or "").strip()]
 
         if missing:
             violations.append({
                 "resource_id": r.get("id"),
+                "resource_key": resource_identity(r),
                 "type": r.get("type"),
                 "missing_tags": missing,
                 "tags": dict(tags),
@@ -90,13 +94,14 @@ def compute_compliance_stats(resources, violations=None):
     violations = violations or []
 
     total = len(resources)
-    violation_ids = {v.get("resource_id") for v in violations if isinstance(v, dict)}
+    assessed = sum(r.get("tags_status") != "unknown" for r in resources)
+    violation_ids = {v.get("resource_key") or (v.get("type"), v.get("resource_id")) for v in violations if isinstance(v, dict)}
     violation_ids.discard(None)
-    compliant = total - len(violation_ids)
+    compliant = assessed - len(violation_ids)
     if compliant < 0:
         logger.warning("More violating IDs than resources; check for mismatched inputs")
         compliant = 0
-    percent = round((compliant / total * 100), 1) if total else 0.0
+    percent = round((compliant / assessed * 100), 1) if assessed else None
 
     by_type = {}
     missing_counts = {}
@@ -109,7 +114,7 @@ def compute_compliance_stats(resources, violations=None):
             missing_counts[tag] = missing_counts.get(tag, 0) + 1
 
     stats = {
-        "total": total,
+        "total": total, "assessed": assessed, "unassessed": total-assessed,
         "compliant": compliant,
         "violations": len(violations),
         "percent": percent,

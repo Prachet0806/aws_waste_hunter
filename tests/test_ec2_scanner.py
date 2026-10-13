@@ -1,3 +1,5 @@
+import pytest
+from datetime import timedelta
 import scanner.ec2_scanner as ec2_scanner
 
 
@@ -40,10 +42,15 @@ class FakeCloudwatchClient:
                 values = []
             else:
                 values = self.metrics_map[iid].get(metric, [])
+            if values:
+                if metric == "cpu":
+                    values = [values[n % len(values)] for n in range(28)]
+                else:
+                    values = [sum(values)/28]*28
             results.append({
                 "Id": q["Id"],
                 "Label": iid,
-                "Timestamps": [],
+                "Timestamps": [kwargs["StartTime"]+timedelta(hours=6*n) for n in range(len(values))],
                 "Values": values,
                 "StatusCode": "Complete",
             })
@@ -53,6 +60,7 @@ class FakeCloudwatchClient:
 def _instance(iid, itype="t3.micro", az="us-east-1a", tags=None):
     return {
         "InstanceId": iid,
+        "State": {"Name": "running"},
         "InstanceType": itype,
         "Placement": {"AvailabilityZone": az},
         "Tags": tags or [],
@@ -272,9 +280,8 @@ def test_scan_idle_ec2_invalid_threshold(monkeypatch):
     ec2_scanner.CPU_THRESHOLD = None
     ec2_scanner.NETWORK_THRESHOLD = None
 
-    results = ec2_scanner.scan_idle_ec2()
-
-    assert len(results) == 1  # Should use default threshold of 2
+    with pytest.raises(ValueError):
+        ec2_scanner.scan_idle_ec2()
 
 
 def test_scan_idle_ec2_custom_network_threshold(monkeypatch):

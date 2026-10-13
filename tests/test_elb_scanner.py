@@ -1,3 +1,4 @@
+from datetime import timedelta
 import scanner.elb_scanner as elb_scanner
 
 
@@ -73,11 +74,15 @@ class FakeCloudwatchClient:
         
         key = f"{namespace}:{metric_name}:{dimension_value}"
         datapoints = self.metrics_map.get(key, [])
+        if not datapoints and metric_name == "ProcessedBytes":
+            datapoints = self.metrics_map.get(f"{namespace}:RequestCount:{dimension_value}", [])
+        if not datapoints and metric_name == "NewFlowCount":
+            datapoints = self.metrics_map.get(f"{namespace}:ProcessedBytes:{dimension_value}", [])
         
         if not datapoints:
             return {"Datapoints": []}
         
-        return {"Datapoints": [{"Sum": val} for val in datapoints]}
+        return {"Datapoints": [{"Sum": datapoints[n % len(datapoints)], "Timestamp": kwargs["StartTime"]+timedelta(days=n)} for n in range(7)]}
 
 
 def test_scan_unused_elb_alb_with_tags(monkeypatch):
@@ -278,7 +283,7 @@ def test_scan_unused_elb_empty_azs(monkeypatch):
     # Should not crash
     assert len(results) == 1
     assert results[0]["az"] == ""
-    assert results[0]["region"] is None
+    assert results[0]["region"] == "us-east-1"
 
 
 def test_scan_unused_elb_skips_brand_new(monkeypatch):

@@ -1,3 +1,4 @@
+import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 import scanner.snapshot_scanner as snapshot_scanner
@@ -17,6 +18,9 @@ class FakeEC2Client:
         self.meta = SimpleNamespace(region_name=self._region)
         self.images_pages = images_pages or [{"Images": []}]
         self.snapshots_pages = snapshots_pages or [{"Snapshots": []}]
+
+    def describe_snapshot_attribute(self, **kwargs):
+        return {"CreateVolumePermissions": []}
 
     def get_paginator(self, name):
         if name == "describe_images":
@@ -128,10 +132,8 @@ def test_scan_orphaned_snapshots_invalid_min_age(monkeypatch):
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)
     monkeypatch.setenv("MIN_SNAPSHOT_AGE_DAYS", "not-a-number")
 
-    results = snapshot_scanner.scan_orphaned_snapshots()
-
-    # Default 7 days: 5d too new, 30d orphaned
-    assert [r["id"] for r in results] == ["snap-30d"]
+    with pytest.raises(ValueError):
+        snapshot_scanner.scan_orphaned_snapshots()
 
 
 def test_scan_orphaned_snapshots_no_tags(monkeypatch):

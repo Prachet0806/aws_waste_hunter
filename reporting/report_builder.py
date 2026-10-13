@@ -1,4 +1,6 @@
 import logging
+import math
+import html
 from copy import deepcopy
 
 from jinja2 import Template
@@ -55,7 +57,8 @@ def _resource_age_days(r):
 
 def _safe_cost(r):
     try:
-        return float(r.get("monthly_cost", 0) or 0)
+        value = float(r.get("monthly_cost", 0) or 0)
+        return value if math.isfinite(value) and value >= 0 else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -63,19 +66,19 @@ def _safe_cost(r):
 def _escape_md(value):
     if value is None:
         return ""
-    text = str(value)
+    text = html.escape(str(value))
     return text.replace("|", "\\|").replace("\n", " ").strip()
 
 
-REPORT_TEMPLATE = Template("""# AWS Waste Hunter — Cost Optimization Report
+REPORT_TEMPLATE = Template("""# AWS Waste Hunter - Cost Optimization Report
 
 ## Summary
-**Total Monthly Waste:** ${{ "%.2f"|format(total_cost) }}
+**Priced Monthly Subtotal (approximate list prices):** {% if total_available %}${{ "%.2f"|format(total_cost) }}{% else %}Unavailable{% endif %}
 **Resources Found:** {{ resources|length }}{% if truncated %} (showing {{ resources|length }} of {{ total_resources }}){% endif %}
 **Tag Violations:** {{ violations|length }}
 {% if compliance_stats.get('percent') is not none %}**Compliance Score:** {{ compliance_stats.get('percent') }}%
 {% endif %}**Scan Errors:** {{ scan_errors|length }}
-**Delivery Errors:** {{ delivery_errors|length }}
+**Delivery Errors Known at Report Generation:** {{ delivery_errors|length }}
 
 ## Resource Age Tiering
 | Tier | Count | Monthly Cost |
@@ -87,7 +90,7 @@ REPORT_TEMPLATE = Template("""# AWS Waste Hunter — Cost Optimization Report
 {% for r in resources %}
 - **{{ r.type }} {{ r.id }}**{% if r.reason %} ({{ r.reason }}){% endif %}{% if r.details_text %} - {{ r.details_text }}{% endif %}{% if r.age_tier %} [{{ r.age_tier }}]{% endif %}
   - Location: {{ r.location }}
-  - Cost: ${{ r.cost }}/month
+  - Cost: {{ r.cost_text }}
 {% endfor %}
 {% if resources|length == 0 %}
 - None detected
@@ -138,12 +141,12 @@ REPORT_TEMPLATE = Template("""# AWS Waste Hunter — Cost Optimization Report
 {% endif %}
 
 ## Recommended Actions
-- **EBS volumes:** Delete unattached volumes or create snapshots first
+- **EBS volumes:** Verify every attachment and retention requirement; obtain owner approval before cleanup
 - **EC2 instances:** Stop or downsize idle instances, notify owners
 - **Load Balancers:** Remove unused ALB/NLB/Classic LBs
 - **Elastic IPs:** Release unattached EIPs (you are billed while they are unassociated)
-- **Snapshots:** Delete orphaned snapshots not referenced by any AMI
-- **RDS:** Take snapshots then delete stopped clusters/instances
+- **Snapshots:** Review retention, backup ownership, sharing and recovery requirements; AMI absence does not establish safe deletion
+- **RDS:** Verify retention and obtain owner approval; stopped compute is not billed
 - **Tags:** Fix missing tags for cost attribution and ownership
 - **Errors:** Review scan/delivery errors above and check IAM permissions
 
@@ -156,6 +159,11 @@ def _summarize_details(r):
     """Compact one-line metric summary from details/legacy keys."""
     bits = []
     get = lambda k: r.get(k) if r.get(k) not in (None, "") else (r.get("details", {}) or {}).get(k)
+    if r.get("pricing"):
+        bits.append("price: " + str(r["pricing"].get("source", "unknown")))
+        bits.extend(r["pricing"].get("notes", []))
+    if (r.get("tags") or {}).get("owner"):
+        bits.append("owner: " + str(r["tags"]["owner"]))
     if get("avg_cpu") is not None:
         bits.append(f"CPU: {get('avg_cpu')}%")
     if get("max_connections") is not None:
@@ -183,6 +191,7 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
     resources = [deepcopy(r) if isinstance(r, dict) else {} for r in (resources or [])]
     violations = list(violations or [])
 
+    total_available = total_cost is not None
     try:
         total_cost = float(total_cost or 0)
     except (TypeError, ValueError):
@@ -204,9 +213,7 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
 
     total_resources = len(resources)
     truncated = 0
-    if len(resources) > MAX_TABLE_ROWS:
-        truncated = len(resources) - MAX_TABLE_ROWS
-        resources = resources[:MAX_TABLE_ROWS]
+    resources.sort(key=lambda r: (-_safe_cost(r), str(r.get("resource_key", r.get("id", "")))))
 
     # Pre-format rows (escapes markdown-breaking chars, avoids Jinja Undefined leaks).
     rows = []
@@ -225,7 +232,8 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
             "details_text": _escape_md(_summarize_details(r)),
             "age_tier": _escape_md(r.get("age_tier", "")),
             "location": location,
-            "cost": f"{_safe_cost(r):.2f}",
+            "cost": f"{_safe_cost(r):.2f}" if r.get("monthly_cost") is not None else "unknown",
+            "cost_text": f"${_safe_cost(r):.2f}/month" if r.get("monthly_cost") is not None else "Unavailable",
         })
 
     safe_violations = []
@@ -236,7 +244,7 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
             "type": _escape_md(v.get("type", "UNKNOWN")),
             "resource_id": _escape_md(v.get("resource_id", "unknown")),
             "missing_tags": [_escape_md(t) for t in (v.get("missing_tags", []) or [])],
-            "tags": {str(k): str(val) for k, val in ((v.get("tags", {}) or {}).items())} if isinstance(v.get("tags"), dict) else {},
+            "tags": {_escape_md(k): _escape_md(val) for k, val in ((v.get("tags", {}) or {}).items())} if isinstance(v.get("tags"), dict) else {},
         })
 
     def _safe_err(e):
@@ -250,7 +258,7 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
             resources=rows,
             total_resources=total_resources,
             truncated=truncated,
-            total_cost=total_cost,
+            total_cost=total_cost, total_available=total_available,
             violations=safe_violations,
             scan_errors=[_safe_err(e) for e in scan_errors],
             delivery_errors=[_safe_err(e) for e in delivery_errors],
@@ -268,3 +276,14 @@ def build_report(resources, total_cost, violations, scan_errors=None, delivery_e
     except Exception as e:
         logger.error(f"Error rendering report template: {e}", exc_info=True)
         raise
+
+
+def build_notification(result, archive_uri=None):
+    status = result['status']
+    total = result.get('monthly_waste')
+    amount = f"${total:.2f}" if total is not None else "unavailable"
+    return (f"AWS Waste Hunter run {result.get('run_id', 'manual')}\n"
+            f"Status: {status}; scope: {result.get('account_id')}/{result.get('region')}\n"
+            f"Priced monthly subtotal: {amount}; unpriced findings: {result.get('unpriced_resources', 0)}\n"
+            f"Coverage errors: {result.get('scan_errors', 0)}; skipped: {result.get('no_metrics', 0)}\n"
+            + (f"Complete archive: {archive_uri}" if archive_uri else "Archive unavailable; operational failure."))

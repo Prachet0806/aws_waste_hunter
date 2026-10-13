@@ -1,20 +1,56 @@
+# Local environment settings and AWS credentials
 .env
-.venv
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.aws/
+
+# Python virtual environments and compiled files
+.venv/
+.venv-*/
 venv/
 env/
+ENV/
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
 .Python
 *.so
+
+# Packaging output
 *.egg
 *.egg-info/
 dist/
 build/
+*.whl
+pip-wheel-metadata/
+MANIFEST
+
+# Test, coverage, and analysis output
 .coverage
 .coverage.*
 htmlcov/
+/coverage.xml
+/coverage.json
+/junit.xml
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .tox/
+.nox/
+
+# Local Lambda builds and validation dependencies
+.aws-sam/
+.tooling/
+.artifacts/
+samconfig.local.toml
+
+# Runtime logs and editor/OS temporary files
 *.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

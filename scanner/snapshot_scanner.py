@@ -1,3 +1,4 @@
+from utils.scan_context import CURRENT, record_error, protected
 # scanner/snapshot_scanner.py
 import logging
 import os
@@ -16,6 +17,8 @@ DEFAULT_MIN_AGE_DAYS = 7
 
 def _get_min_age_days():
     """Get minimum snapshot age (days) from env var with validation."""
+    if CURRENT.get():
+        return CURRENT.get().config.min_snapshot_age_days
     try:
         raw = os.getenv("MIN_SNAPSHOT_AGE_DAYS", str(DEFAULT_MIN_AGE_DAYS))
         value = int(float(raw)) if isinstance(raw, str) and "." in raw else int(raw)
@@ -30,6 +33,8 @@ def _get_min_age_days():
 
 def _get_ec2_client():
     """Lazy initialization of EC2 client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("ec2")
     global _ec2_client
     if _ec2_client is None:
         _ec2_client = get_client("ec2")
@@ -37,15 +42,15 @@ def _get_ec2_client():
 
 
 def _collect_ami_snapshot_ids(ec2):
-    """Collect all SnapshotIds referenced by self-owned AMIs (fail-open)."""
+    """Collect references including disabled AMIs; failed discovery stops the scan."""
     referenced = set()
     try:
         paginator = ec2.get_paginator("describe_images")
     except Exception as e:
         log_and_skip("ami-snapshots", "describe_images paginator unavailable", e)
-        return referenced
+        raise
     try:
-        for page in paginator.paginate(Owners=["self"]):
+        for page in paginator.paginate(Owners=["self"], IncludeDeprecated=True, IncludeDisabled=True):
             for image in ((page or {}).get("Images", []) or []):
                 for mapping in ((image or {}).get("BlockDeviceMappings", []) or []):
                     ebs = (mapping or {}).get("Ebs", {}) or {}
@@ -54,6 +59,7 @@ def _collect_ami_snapshot_ids(ec2):
                         referenced.add(snapshot_id)
     except Exception as e:
         log_and_skip("ami-snapshots", "describe_images paginate error", e)
+        raise
     return referenced
 
 
@@ -81,12 +87,23 @@ def scan_orphaned_snapshots():
                 if not sid:
                     logger.warning("Skipping snapshot record without SnapshotId")
                     continue
+                if protected(normalize_tags(s.get("Tags", []))) or s.get("State", "completed") != "completed":
+                    log_and_skip(sid, "protected or incomplete snapshot")
+                    continue
                 if sid in referenced:
                     continue
 
+                try:
+                    permissions = ec2.describe_snapshot_attribute(SnapshotId=sid, Attribute="createVolumePermission")
+                except Exception as exc:
+                    log_and_skip(sid, "snapshot sharing unverifiable", exc)
+                    continue
+                if permissions.get("CreateVolumePermissions"):
+                    log_and_skip(sid, "shared snapshot")
+                    continue
                 start_time = s.get("StartTime")
                 if start_time is None:
-                    # Fail-open skip with explicit log (Decision 1).
+                    # Missing age evidence suppresses the recommendation.
                     log_and_skip(sid, "missing StartTime")
                     continue
                 try:
@@ -108,7 +125,7 @@ def scan_orphaned_snapshots():
                     days_old = round((now.timestamp() - start_ts) / 86400, 1)
                 orphaned.append(build_resource(
                     "SNAPSHOT", sid, region=region, az="",
-                    reason="orphaned-old-snapshot",
+                    reason="unreferenced-by-owned-ami-review-retention",
                     age_days=days_old,
                     tags=normalize_tags(s.get("Tags", []), source=f"snap:{sid}"),
                     size_gb=size,

@@ -6,14 +6,15 @@ from setuptools import setup, find_packages
 
 setup(
     name="aws-waste-hunter",
-    version="2.1.0",
+    version="3.0.0",
     description="AWS FinOps automation bot for waste detection",
     packages=find_packages(exclude=["tests", "tests.*"]),
-    python_requires=">=3.9",
+    py_modules=["lambda_handler"],
+    python_requires=">=3.12",
     install_requires=[
-        "boto3>=1.34,<2",
-        "botocore>=1.34,<2",
-        "jinja2>=3.1,<4",
+        "boto3==1.42.16",
+        "botocore==1.42.16",
+        "jinja2==3.1.6",
     ],
     extras_require={
         "dev": [

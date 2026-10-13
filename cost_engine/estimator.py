@@ -1,3 +1,9 @@
+from contextvars import ContextVar
+PRICE_SOURCE = ContextVar("price_source", default="unknown")
+import math
+from decimal import Decimal, ROUND_HALF_UP
+from utils.schema import field as schema_field, resource_identity
+from utils.scan_context import check_deadline
 import json
 import os
 import logging
@@ -90,19 +96,15 @@ _REQUIRED_PRICING_KEYS = ("EBS", "EC2", "ELB", "RDS", "RDS_INSTANCE", "EIP", "SN
 
 
 def _field(resource, name, default=None):
-    """Read a field from top-level or details (normalized schema)."""
-    if not isinstance(resource, dict):
-        return default
-    if resource.get(name) is not None:
-        return resource.get(name)
-    details = resource.get("details")
-    if isinstance(details, dict) and details.get(name) is not None:
-        return details.get(name)
-    return default
+    return schema_field(resource, name, default)
 
 
 def _load_pricing():
     """Load pricing config, deep-merging any user override over the defaults."""
+    from utils.scan_context import CURRENT
+    context = CURRENT.get()
+    if context and context.config.pricing_json:
+        return json.loads(context.config.pricing_json)
     loaded = None
 
     pricing_json = os.environ.get("PRICING_JSON")
@@ -110,7 +112,7 @@ def _load_pricing():
         try:
             loaded = json.loads(pricing_json)
         except json.JSONDecodeError as e:
-            logger.warning(f"Invalid PRICING_JSON, using defaults: {e}")
+            raise ValueError("Invalid PRICING_JSON") from e
 
     if loaded is None:
         pricing_file = os.environ.get("PRICING_FILE")
@@ -120,16 +122,15 @@ def _load_pricing():
                     with open(pricing_file, "r", encoding="utf-8") as handle:
                         loaded = json.load(handle)
                 except (json.JSONDecodeError, OSError) as e:
-                    logger.warning(f"Invalid PRICING_FILE, using defaults: {e}")
+                    raise ValueError("Invalid PRICING_FILE") from e
             else:
-                logger.warning(f"PRICING_FILE not found: {pricing_file}, using defaults")
+                raise ValueError("PRICING_FILE not found")
 
     if loaded is None:
         return DEFAULT_PRICING
 
     if not isinstance(loaded, dict):
-        logger.warning("PRICING_JSON/PRICING_FILE must be a JSON object, using defaults")
-        return DEFAULT_PRICING
+        raise ValueError("Pricing configuration must be a JSON object")
 
     # Deep merge over defaults so partial configs don't cause KeyErrors
     merged = json.loads(json.dumps(DEFAULT_PRICING))
@@ -144,6 +145,22 @@ def _load_pricing():
         if key not in loaded:
             logger.warning(f"Pricing override missing '{key}', using default")
 
+    def validate(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                validate(child)
+        else:
+            numeric = float(value)
+            if not math.isfinite(numeric) or numeric < 0:
+                raise ValueError("Pricing values must be finite and nonnegative")
+    validate(merged)
+    tables = {"EC2", "RDS_INSTANCE", "EBS_IOPS", "EBS_THROUGHPUT", "RDS_STORAGE", "RDS_IOPS", "EC2_CONFIGS", "RDS_CONFIGS"}
+    for key in tables & merged.keys():
+        if not isinstance(merged[key], dict):
+            raise ValueError(f"{key} must be a rate table")
+    for key in {"ELB", "NLB", "ELB_CLASSIC", "RDS", "EIP", "SNAPSHOT"} & merged.keys():
+        if isinstance(merged[key], dict):
+            raise ValueError(f"{key} must be a scalar rate")
     return merged
 
 
@@ -151,7 +168,7 @@ def _get_pricing_client():
     """Lazy initialization of Pricing API client (always us-east-1)."""
     global _pricing_client
     if _pricing_client is None:
-        _pricing_client = boto3.client("pricing", region_name="us-east-1", config=BOTO3_CONFIG)
+        _pricing_client = boto3.session.Session().client("pricing", region_name="us-east-1", config=BOTO3_CONFIG)
     return _pricing_client
 
 
@@ -179,6 +196,7 @@ def _clean_cache():
 def clear_price_cache():
     """Explicit cache reset (tests/teardown should call this, not prod paths)."""
     _PRICE_CACHE.clear()
+    _FAILURE_CACHE.clear()
 
 
 def _safe_price(fn, *args):
@@ -189,18 +207,6 @@ def _safe_price(fn, *args):
         logger.warning(f"Pricing API call failed: {e}")
         return None
 
-
-def _get_cached_price(key):
-    """Get price from cache if valid TTL (compat: checks namespaced + legacy keys)."""
-    for candidate in (key, f"live:{key}", f"static:{key}"):
-        if candidate in _PRICE_CACHE:
-            cached = _PRICE_CACHE[candidate]
-            ttl = cached.get("ttl", CACHE_TTL)
-            if time.time() - cached.get("timestamp", 0) < ttl:
-                return cached.get("price")
-    # Also prune expired entries on read.
-    _clean_cache()
-    return None
 
 
 def _cache_price(key, price, ttl=None, namespace=None):
@@ -217,73 +223,22 @@ def _cache_price(key, price, ttl=None, namespace=None):
 
 
 def _get_static_fallback(resource_type, **kwargs):
-    """Get static fallback price from merged pricing config.
-
-    Returns prices in canonical units:
-    - EC2, ELB, NLB, ELB_CLASSIC: hourly
-    - EBS, SNAPSHOT: per-GB-month
-    - RDS, RDS_CLUSTER, RDS_INSTANCE, EIP: monthly
-    """
+    """Return a configured canonical-unit rate, or None for unsupported inputs."""
     pricing = _load_pricing()
-    if not isinstance(pricing, dict):
-        return None
-
     if resource_type == "EC2":
-        instance_type = kwargs.get("instance_type")
-        ec2_table = pricing.get("EC2")
-        if not isinstance(ec2_table, dict):
-            return DEFAULT_EC2_FALLBACK / HOURS_PER_MONTH
-        monthly = ec2_table.get(instance_type, DEFAULT_EC2_FALLBACK)
-        try:
-            return float(monthly) / HOURS_PER_MONTH
-        except (TypeError, ValueError):
-            return DEFAULT_EC2_FALLBACK / HOURS_PER_MONTH
-
-    elif resource_type == "EBS":
-        try:
-            return float(pricing.get("EBS", 0.10))
-        except (TypeError, ValueError):
-            return 0.10
-
-    elif resource_type in ("ELB", "NLB", "ELB_CLASSIC"):
-        raw = pricing.get(resource_type, pricing.get("ELB", 18.00))
-        try:
-            return float(raw) / HOURS_PER_MONTH
-        except (TypeError, ValueError):
-            return 18.00 / HOURS_PER_MONTH
-
-    elif resource_type in ("RDS", "RDS_CLUSTER"):
-        try:
-            return float(pricing.get("RDS", 120.00))
-        except (TypeError, ValueError):
-            return 120.00
-
-    elif resource_type == "RDS_INSTANCE":
-        instance_class = kwargs.get("instance_class")
-        table = pricing.get("RDS_INSTANCE")
-        default = pricing.get("RDS", 120.00)
-        if not isinstance(table, dict):
-            try:
-                return float(default)
-            except (TypeError, ValueError):
-                return 120.00
-        try:
-            return float(table.get(instance_class, default))
-        except (TypeError, ValueError):
-            return 120.00
-
-    elif resource_type == "EIP":
-        try:
-            return float(pricing.get("EIP", 3.60))
-        except (TypeError, ValueError):
-            return 3.60
-
-    elif resource_type == "SNAPSHOT":
-        try:
-            return float(pricing.get("SNAPSHOT", 0.05))
-        except (TypeError, ValueError):
-            return 0.05
-
+        monthly = pricing["EC2"].get(kwargs.get("instance_type"))
+        return float(monthly)/HOURS_PER_MONTH if monthly is not None else None
+    if resource_type == "EBS":
+        raw = pricing["EBS"]
+        value = raw.get(kwargs.get("volume_type")) if isinstance(raw, dict) else raw
+        return float(value) if value is not None else None
+    if resource_type in ("ELB", "NLB", "ELB_CLASSIC"):
+        return float(pricing.get(resource_type, pricing["ELB"]))/HOURS_PER_MONTH
+    if resource_type == "RDS_INSTANCE":
+        value = pricing["RDS_INSTANCE"].get(kwargs.get("instance_class"))
+        return float(value) if value is not None else None
+    if resource_type in ("EIP", "SNAPSHOT"):
+        return float(pricing[resource_type])
     return None
 
 
@@ -298,6 +253,7 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
     Returns price per unit (hourly for EC2/ELB, per-GB-month for EBS/SNAPSHOT,
     monthly for RDS/EIP), or None for unknown resource types.
     """
+    PRICE_SOURCE.set("unknown")
     if pricing_mode is None:
         pricing_mode = os.environ.get("PRICING_MODE", "static").lower()
 
@@ -307,7 +263,7 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
 
     region = region or "us-east-1"
 
-    # Build cache key
+    # Include all price-defining attributes and configuration in the identity.
     if resource_type == "EC2":
         key = ("EC2", kwargs.get("instance_type"), region)
     elif resource_type == "EBS":
@@ -326,12 +282,16 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
         logger.warning(f"Unknown resource type for pricing: {resource_type}")
         return None
 
-    if pricing_mode == "live":
+    key = (key, tuple(sorted((k, str(v)) for k, v in kwargs.items())),
+           json.dumps(_load_pricing(), sort_keys=True))
+    if pricing_mode == "live" and not _failure_cached(key):
+        check_deadline()
         # Step 1: live cache.
         live_key = f"live:{key}"
         if live_key in _PRICE_CACHE:
             cached = _PRICE_CACHE[live_key]
             if time.time() - cached.get("timestamp", 0) < CACHE_TTL:
+                PRICE_SOURCE.set("live-catalog")
                 return cached.get("price")
 
         # Step 2: live API for all supported types.
@@ -358,9 +318,13 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
         except Exception as e:
             logger.warning(f"Live pricing API error for {resource_type}: {e}")
 
+        if live_price is not None and (not math.isfinite(float(live_price)) or live_price < 0):
+            live_price = None
         if live_price is not None:
             _cache_price(key, live_price, ttl=CACHE_TTL, namespace="live")
+            PRICE_SOURCE.set("live-catalog")
             return live_price
+        _FAILURE_CACHE[str(key)] = time.monotonic() + 30
         logger.info(f"Live pricing unavailable for {resource_type}, falling back to static")
 
     # Static path (also used in static mode): static cache -> config.
@@ -368,6 +332,7 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
     if static_key in _PRICE_CACHE:
         cached = _PRICE_CACHE[static_key]
         if time.time() - cached.get("timestamp", 0) < STATIC_CACHE_TTL:
+            PRICE_SOURCE.set("static-approximation")
             return cached.get("price")
 
     if resource_type == "GATEWAY":
@@ -377,23 +342,22 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
     static_price = _get_static_fallback(resource_type, **kwargs)
     if static_price is not None:
         _cache_price(key, static_price, ttl=STATIC_CACHE_TTL, namespace="static")
+        PRICE_SOURCE.set("static-approximation")
         return static_price
 
-    # Step 4: Hardcoded absolute defaults (last resort)
-    hardcoded = {
-        "EC2": DEFAULT_EC2_FALLBACK / HOURS_PER_MONTH,
-        "EBS": 0.10,
-        "ELB": 18.00 / HOURS_PER_MONTH,
-        "NLB": 18.00 / HOURS_PER_MONTH,
-        "ELB_CLASSIC": 18.00 / HOURS_PER_MONTH,
-        "GATEWAY": 18.00 / HOURS_PER_MONTH,
-        "RDS": 120.0,
-        "RDS_CLUSTER": 120.0,
-        "RDS_INSTANCE": 120.0,
-        "EIP": 3.60,
-        "SNAPSHOT": 0.05,
-    }
-    return hardcoded.get(resource_type)
+    return None
+
+
+_FAILURE_CACHE = {}
+
+
+def _failure_cached(key):
+    now = time.monotonic()
+    for expired in [k for k, deadline in _FAILURE_CACHE.items() if deadline <= now]:
+        del _FAILURE_CACHE[expired]
+    if len(_FAILURE_CACHE) > MAX_CACHE_SIZE:
+        _FAILURE_CACHE.clear()
+    return _FAILURE_CACHE.get(str(key), 0) > now
 
 
 def _get_location(region):
@@ -408,52 +372,27 @@ def _get_location(region):
 _USAGE_UNITS = ("Hrs", "GB-Mo", "GB-Month", "GB-Months")
 
 
-def _extract_price_per_unit(pricing_response):
-    """Extract a USD price per usage unit, preferring hourly/per-GB dimensions.
-
-    For multi-dimension offers (e.g. ALB hourly + LCU), only the hourly
-    ('Hrs') dimension is accepted here; LCU/request dimensions return None so
-    callers fall back to static instead of mispricing. Generic fallback to the
-    first USD dimension applies only to single-dimension offers.
-    """
-    items = (pricing_response or {}).get("PriceList", []) or []
-    for item in items:
+def _extract_price_per_unit(pricing_response, allowed_units=None):
+    """Reject ambiguous or dimensionally incompatible offers."""
+    if (pricing_response or {}).get("Incomplete"):
+        return None
+    units = set(allowed_units or ("Hrs", "GB-Mo", "GB-Month", "GB-Months"))
+    prices = set()
+    for item in (pricing_response or {}).get("PriceList", []) or []:
         try:
             data = json.loads(item) if isinstance(item, str) else item
-        except (json.JSONDecodeError, TypeError):
-            continue
-        terms = (data.get("terms", {}) or {}).get("OnDemand", {}) or {}
-        for offer in terms.values():
-            dimensions = (offer or {}).get("priceDimensions", {}) or {}
-            hourly = [
-                d for d in dimensions.values()
-                if isinstance(d, dict) and d.get("unit") == "Hrs"
-                and (d.get("pricePerUnit", {}) or {}).get("USD") is not None
-            ]
-            if hourly:
-                try:
-                    return float(hourly[0]["pricePerUnit"]["USD"])
-                except (TypeError, ValueError, KeyError):
-                    continue
-            gb = [
-                d for d in dimensions.values()
-                if isinstance(d, dict) and d.get("unit") in ("GB-Mo", "GB-Month", "GB-Months")
-                and (d.get("pricePerUnit", {}) or {}).get("USD") is not None
-            ]
-            if gb:
-                try:
-                    return float(gb[0]["pricePerUnit"]["USD"])
-                except (TypeError, ValueError, KeyError):
-                    continue
-            if len(dimensions) == 1:
-                dim = next(iter(dimensions.values()))
-                price_str = (dim.get("pricePerUnit", {}) or {}).get("USD")
-                if price_str is not None:
-                    try:
-                        return float(price_str)
-                    except (TypeError, ValueError):
+            terms = data.get("terms", {}).get("OnDemand", {})
+            for offer in terms.values():
+                for dim in offer.get("priceDimensions", {}).values():
+                    if dim.get("unit") not in units:
                         continue
-    return None
+                    value = float(dim.get("pricePerUnit", {}).get("USD"))
+                    if not math.isfinite(value) or value < 0:
+                        return None
+                    prices.add(value)
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return prices.pop() if len(prices) == 1 else None
 
 
 def _query_products(service_code, filters, max_pages=3):
@@ -465,11 +404,13 @@ def _query_products(service_code, filters, max_pages=3):
         kwargs = {"ServiceCode": service_code, "Filters": filters, "MaxResults": 10}
         if token:
             kwargs["NextToken"] = token
+        check_deadline()
         response = pricing.get_products(**kwargs)
         collected["PriceList"].extend(response.get("PriceList", []) or [])
         token = response.get("NextToken")
-        if not token or collected["PriceList"]:
+        if not token:
             break
+    collected["Incomplete"] = bool(token)
     return collected
 
 
@@ -495,7 +436,7 @@ def _get_ec2_hourly_price(instance_type, region):
             ],
             MaxResults=1,
         )
-        return _extract_price_per_unit(response)
+        return _extract_price_per_unit(response, ("Hrs",))
     except Exception as e:
         logger.error(f"Error fetching EC2 price for {instance_type} in {region}: {e}")
         return None
@@ -520,7 +461,7 @@ def _get_ebs_gb_month_price(volume_type, region):
                 {"Type": "TERM_MATCH", "Field": "volumeApiName", "Value": volume_api_name},
             ],
         )
-        price = _extract_price_per_unit(response)
+        price = _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
 
         # Fall back to the family-level filter for unusual/legacy volume types
         if price is None:
@@ -533,7 +474,7 @@ def _get_ebs_gb_month_price(volume_type, region):
                     {"Type": "TERM_MATCH", "Field": "volumeType", "Value": volume_family},
                 ],
             )
-            price = _extract_price_per_unit(response)
+            price = _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
 
         return price
     except Exception as e:
@@ -557,7 +498,7 @@ def _get_alb_hourly_price(region):
                 {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Application"},
             ],
         )
-        return _extract_price_per_unit(response)
+        return _extract_price_per_unit(response, ("Hrs",))
     except Exception as e:
         logger.error(f"Error fetching ELB price for {region}: {e}")
         return None
@@ -579,7 +520,7 @@ def _get_nlb_hourly_price(region):
                 {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Network"},
             ],
         )
-        return _extract_price_per_unit(response)
+        return _extract_price_per_unit(response, ("Hrs",))
     except Exception as e:
         logger.error(f"Error fetching NLB price for {region}: {e}")
         return None
@@ -601,7 +542,7 @@ def _get_classic_elb_hourly_price(region):
                 {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Classic"},
             ],
         )
-        return _extract_price_per_unit(response)
+        return _extract_price_per_unit(response, ("Hrs",))
     except Exception as e:
         logger.error(f"Error fetching Classic ELB price for {region}: {e}")
         return None
@@ -612,21 +553,25 @@ def _get_rds_monthly_price(instance_class, engine, region):
     location = _get_location(region)
     if not location:
         return None
-    filters = [{"Type": "TERM_MATCH", "Field": "location", "Value": location}]
+    if not instance_class or not engine:
+        return None
+    filters = [{"Type": "TERM_MATCH", "Field": "location", "Value": location},
+               {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Database Instance"},
+               {"Type": "TERM_MATCH", "Field": "deploymentOption", "Value": "Single-AZ"}]
     if instance_class:
         filters.append({"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_class})
     else:
         filters.append({"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Database Instance"})
     if engine:
-        engine_map = {"aurora-mysql": "Aurora MySQL", "aurora-postgresql": "Aurora PostgreSQL",
-                      "mysql": "MySQL", "postgres": "PostgreSQL", "mariadb": "MariaDB",
-                      "oracle-ee": "Oracle", "sqlserver-ee": "SQL Server"}
+        engine_map = {"mysql": "MySQL", "postgres": "PostgreSQL", "mariadb": "MariaDB"}
         mapped = engine_map.get(str(engine).lower())
+        if not mapped:
+            return None
         if mapped:
             filters.append({"Type": "TERM_MATCH", "Field": "databaseEngine", "Value": mapped})
     try:
         response = _query_products("AmazonRDS", filters)
-        price_hourly = _extract_price_per_unit(response)
+        price_hourly = _extract_price_per_unit(response, ("Hrs",))
         if price_hourly is None:
             return None
         # RDS Pricing API returns hourly; convert to monthly.
@@ -649,7 +594,7 @@ def _get_eip_monthly_price(region):
                 {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "IP Address"},
             ],
         )
-        price_hourly = _extract_price_per_unit(response)
+        price_hourly = _extract_price_per_unit(response, ("Hrs",))
         if price_hourly is None:
             return None
         return float(price_hourly) * HOURS_PER_MONTH
@@ -671,105 +616,41 @@ def _get_snapshot_gb_month_price(region):
                 {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Storage Snapshot"},
             ],
         )
-        return _extract_price_per_unit(response)
+        return _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
     except Exception as e:
         logger.error(f"Error fetching snapshot price for {region}: {e}")
         return None
 
 
 def estimate_monthly_waste(resources):
-    """
-    Estimate monthly waste cost for resources.
-    Returns new list with cost annotations, does not mutate input.
-    Never clears the price cache (callers/tests manage lifecycle explicitly).
-    """
-    pricing_mode = os.environ.get("PRICING_MODE", "static").lower()
-
-    # Validate pricing mode
-    if pricing_mode not in ["static", "live"]:
-        logger.warning(f"Invalid PRICING_MODE '{pricing_mode}', using 'static'")
+    """Return priced findings plus a reconciled subtotal, preserving unpriced rows."""
+    from cost_engine.pricing_provider import estimate
+    from utils.scan_context import CURRENT
+    context = CURRENT.get()
+    pricing_mode = context.config.pricing_mode if context else os.environ.get("PRICING_MODE", "static").lower()
+    if pricing_mode not in ("static", "live"):
         pricing_mode = "static"
-
-    report = []
-    total = 0
-
-    # Deduplicate resources by (type, id)
-    seen = set()
-    unique_resources = []
-    for r in resources or []:
-        if not isinstance(r, dict):
-            logger.warning(f"Skipping non-dict resource: {r!r}")
+    rows, seen, total = [], set(), Decimal("0")
+    budget_exhausted = False
+    pricing = _load_pricing()
+    for resource in resources or []:
+        if not isinstance(resource, dict):
             continue
-        key = (r.get("type"), r.get("id"))
-        if key not in seen:
-            seen.add(key)
-            unique_resources.append(r)
+        key = resource_identity(resource)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            check_deadline()
+        except TimeoutError:
+            budget_exhausted = True
+        if budget_exhausted:
+            cost, provenance = None, {"source": "unknown", "complete": False, "components": [], "notes": ["Pricing deadline exhausted"]}
         else:
-            logger.warning(f"Duplicate resource detected: {key}")
-
-    logger.info(f"Estimating costs for {len(unique_resources)} unique resources (pricing_mode={pricing_mode})")
-
-    for r in unique_resources:
-        cost = 0
-        resource_type = (r.get("type") or "UNKNOWN")
-        region = r.get("region") or (r.get("details", {}) or {}).get("region") or "us-east-1"
-        if not r.get("region"):
-            logger.debug(f"Resource {r.get('id')} missing region, defaulting to us-east-1")
-
-        if resource_type == "EBS":
-            volume_type = _field(r, "volume_type", "gp3")
-            try:
-                size = float(_field(r, "size_gb", 0) or 0)
-            except (TypeError, ValueError):
-                size = 0
-            price_per_gb = get_price("EBS", region, pricing_mode, volume_type=volume_type)
-            cost = size * (price_per_gb if price_per_gb is not None else 0.10)
-
-        elif resource_type == "EC2":
-            hourly = get_price("EC2", region, pricing_mode, instance_type=_field(r, "instance_type"))
-            cost = hourly * HOURS_PER_MONTH if hourly is not None else 0
-
-        elif resource_type == "ELB":
-            lb_type = str(_field(r, "lb_type", "APPLICATION") or "APPLICATION").upper()
-            if lb_type == "GATEWAY":
-                logger.warning("Gateway LB priced at ALB rate (approximation)")
-            price_type = {"NETWORK": "NLB", "CLASSIC": "ELB_CLASSIC", "GATEWAY": "ELB"}.get(lb_type, "ELB")
-            hourly = get_price(price_type, region, pricing_mode)
-            cost = hourly * HOURS_PER_MONTH if hourly is not None else 0
-
-        elif resource_type in ("RDS_CLUSTER", "RDS"):
-            # RDS prices are monthly (storage for stopped, full instance for idle)
-            monthly = get_price("RDS", region, pricing_mode,
-                                instance_class=_field(r, "instance_class"),
-                                engine=_field(r, "engine"))
-            cost = monthly if monthly is not None else 0
-
-        elif resource_type == "RDS_INSTANCE":
-            monthly = get_price("RDS_INSTANCE", region, pricing_mode,
-                                instance_class=_field(r, "instance_class"),
-                                engine=_field(r, "engine"))
-            cost = monthly if monthly is not None else 0
-
-        elif resource_type == "EIP":
-            monthly = get_price("EIP", region, pricing_mode)
-            cost = monthly if monthly is not None else 0
-
-        elif resource_type == "SNAPSHOT":
-            try:
-                size = float(_field(r, "size_gb", 0) or 0)
-            except (TypeError, ValueError):
-                size = 0
-            price_per_gb = get_price("SNAPSHOT", region, pricing_mode)
-            cost = size * (price_per_gb if price_per_gb is not None else 0.05)
-
-        else:
-            logger.warning(f"Unknown resource type: {resource_type}")
-            cost = 0
-
-        # Create new dict with cost annotation (avoid mutation)
-        annotated = {**r, "monthly_cost": round(cost, 2)}
-        total += cost
-        report.append(annotated)
-
-    logger.info(f"Total estimated monthly waste: ${round(total, 2)}")
-    return report, round(total, 2)
+            cost, provenance = estimate(resource, pricing_mode, get_price, pricing)
+        money = Decimal(str(cost)).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) if cost is not None else None
+        if money is not None:
+            total += money
+        rows.append({**resource, "monthly_cost": float(money) if money is not None else None,
+                     "pricing": provenance})
+    return rows, float(total)

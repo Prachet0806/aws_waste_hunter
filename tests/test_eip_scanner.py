@@ -16,9 +16,8 @@ class FakeEC2Client:
         self.meta = SimpleNamespace(region_name=self._region)
         self.addresses_pages = addresses_pages
 
-    def get_paginator(self, name):
-        assert name == "describe_addresses"
-        return FakeEC2Paginator(self.addresses_pages)
+    def describe_addresses(self):
+        return {"Addresses": [a for page in self.addresses_pages for a in page["Addresses"]]}
 
 
 def _eip(**kwargs):
@@ -104,7 +103,7 @@ def test_scan_unattached_eips_empty(monkeypatch):
     assert results == []
 
 
-def test_scan_unattached_eips_pagination(monkeypatch):
+def test_scan_unattached_eips_multiple_addresses(monkeypatch):
     """Test EIP scan across multiple pages."""
     pages = [
         {"Addresses": [_eip(AllocationId="eipalloc-1")]},
@@ -125,7 +124,7 @@ def test_scan_unattached_eips_error_propagates(monkeypatch):
         def __init__(self):
             self.meta = SimpleNamespace(region_name="us-east-1")
 
-        def get_paginator(self, name):
+        def describe_addresses(self):
             raise RuntimeError("API down")
 
     monkeypatch.setattr(eip_scanner, "_ec2_client", ExplodingClient())

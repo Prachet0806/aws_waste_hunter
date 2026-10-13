@@ -1,0 +1,134 @@
+{
+  "Comment": "Production scanner isolation; data stays in scoped S3 artifacts",
+  "StartAt": "Scan",
+  "TimeoutSeconds": 1200,
+  "States": {
+    "Scan": {
+      "Type": "Map",
+      "ItemsPath": "$.scanners",
+      "MaxConcurrency": 4,
+      "ItemSelector": {
+        "scanner.$": "$$.Map.Item.Value",
+        "run_id.$": "$.run_id",
+        "account_id.$": "$.account_id",
+        "config.$": "$.config"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "InvokeScanner",
+        "States": {
+          "InvokeScanner": {
+            "Type": "Task",
+            "Resource": "arn:${Partition}:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${ScannerArn}",
+              "Payload.$": "$"
+            },
+            "TimeoutSeconds": 300,
+            "ResultSelector": {
+              "scanner.$": "$.Payload.scanner",
+              "bucket.$": "$.Payload.bucket",
+              "key.$": "$.Payload.key",
+              "status.$": "$.Payload.status"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 5,
+                "BackoffRate": 2,
+                "MaxAttempts": 2
+              },
+              {
+                "ErrorEquals": [
+                  "RetryableScanError",
+                  "RetryableStageError"
+                ],
+                "IntervalSeconds": 10,
+                "BackoffRate": 2,
+                "MaxAttempts": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.failure",
+                "Next": "ScannerFailed"
+              }
+            ],
+            "End": true
+          },
+          "ScannerFailed": {
+            "Type": "Pass",
+            "Parameters": {
+              "scanner.$": "$.scanner",
+              "status": "failed"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.outputs",
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:${Partition}:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${FinalizerArn}",
+        "Payload.$": "$"
+      },
+      "TimeoutSeconds": 270,
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": 2
+        },
+        {
+          "ErrorEquals": [
+            "RetryableStageError"
+          ],
+          "IntervalSeconds": 10,
+          "BackoffRate": 2,
+          "MaxAttempts": 2
+        }
+      ],
+      "Next": "Outcome"
+    },
+    "Outcome": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.status",
+          "StringEquals": "failed",
+          "Next": "RunFailed"
+        }
+      ],
+      "Default": "Complete"
+    },
+    "RunFailed": {
+      "Type": "Fail",
+      "Error": "WasteHunterRunFailed",
+      "Cause": "Inspect scoped manifest and execution history"
+    },
+    "Complete": {
+      "Type": "Succeed"
+    }
+  }
+}

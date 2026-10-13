@@ -4,6 +4,9 @@ import scanner.ebs_scanner as ebs_scanner
 class FakeEC2Client:
     def __init__(self, volumes_data, instances_data=None):
         self.volumes_data = volumes_data
+        for page in volumes_data:
+            for volume in page.get("Volumes", []):
+                volume.setdefault("State", "available")
         self.instances_data = instances_data or []
 
     def get_paginator(self, name):

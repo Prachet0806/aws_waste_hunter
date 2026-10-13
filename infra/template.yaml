@@ -1,0 +1,841 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Read-only FinOps discovery with isolated tasks and complete report archives
+Parameters:
+  PricingMode:
+    Type: String
+    Default: static
+    AllowedValues:
+    - static
+    - live
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 14 ? * MON *)
+  ScheduleEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  RetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 30
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    AllowedPattern: ^(|arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-zA-Z0-9-]+)$
+  ReportEmail:
+    Type: String
+    Default: ''
+  HealthEmail:
+    Type: String
+    Default: ''
+  PricingJson:
+    Type: String
+    Default: ''
+    Description: Verified optional per-component/deployment USD rates as JSON
+  RequiredTags:
+    Type: String
+    Default: owner,env,cost-center
+  ExcludedTagsJson:
+    Type: String
+    Default: '{"waste-hunter:exclude":"true","waste-hunter-backup":"true"}'
+Conditions:
+  HasKms:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: KmsKeyArn
+      - ''
+  HasReportEmail:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: ReportEmail
+      - ''
+  HasHealthEmail:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: HealthEmail
+      - ''
+  ScheduleOn:
+    Fn::Equals:
+    - Ref: ScheduleEnabled
+    - 'true'
+Resources:
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm:
+              Fn::If:
+              - HasKms
+              - aws:kms
+              - AES256
+            KMSMasterKeyID:
+              Fn::If:
+              - HasKms
+              - Ref: KmsKeyArn
+              - Ref: AWS::NoValue
+      LifecycleConfiguration:
+        Rules:
+        - Id: ReportsRetention
+          Status: Enabled
+          ExpirationInDays:
+            Ref: RetentionDays
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 30
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: ReportBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Deny
+          Principal: '*'
+          Action: s3:*
+          Resource:
+          - Fn::GetAtt:
+            - ReportBucket
+            - Arn
+          - Fn::Sub: ${ReportBucket.Arn}/*
+          Condition:
+            Bool:
+              aws:SecureTransport: 'false'
+  RunTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: pk
+        AttributeType: S
+      KeySchema:
+      - AttributeName: pk
+        KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  ReportTopic:
+    Type: AWS::SNS::Topic
+  HealthTopic:
+    Type: AWS::SNS::Topic
+  ScannerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: Runtime
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:log-stream:*
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            Resource:
+              Fn::GetAtt:
+              - RunTable
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${ReportBucket.Arn}/reports/*
+          - Fn::If:
+            - HasKms
+            - Effect: Allow
+              Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+              Resource:
+                Ref: KmsKeyArn
+              Condition:
+                StringEquals:
+                  kms:ViaService:
+                    Fn::Sub: s3.${AWS::Region}.${AWS::URLSuffix}
+            - Ref: AWS::NoValue
+          - Effect: Allow
+            Action:
+            - ec2:DescribeInstances
+            - ec2:DescribeVolumes
+            - ec2:DescribeAddresses
+            - ec2:DescribeSnapshots
+            - ec2:DescribeImages
+            - ec2:DescribeSnapshotAttribute
+            - elasticloadbalancing:DescribeLoadBalancers
+            - elasticloadbalancing:DescribeTags
+            - elasticloadbalancing:DescribeListeners
+            - elasticloadbalancing:DescribeTargetGroups
+            - elasticloadbalancing:DescribeTargetHealth
+            - elasticloadbalancing:DescribeInstanceHealth
+            - rds:DescribeDBInstances
+            - rds:DescribeDBClusters
+            - rds:ListTagsForResource
+            - cloudwatch:GetMetricData
+            - cloudwatch:GetMetricStatistics
+            Resource: '*'
+  FinalizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: Runtime
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:log-stream:*
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            Resource:
+              Fn::GetAtt:
+              - RunTable
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${ReportBucket.Arn}/reports/*
+          - Fn::If:
+            - HasKms
+            - Effect: Allow
+              Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+              Resource:
+                Ref: KmsKeyArn
+              Condition:
+                StringEquals:
+                  kms:ViaService:
+                    Fn::Sub: s3.${AWS::Region}.${AWS::URLSuffix}
+            - Ref: AWS::NoValue
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${ReportBucket.Arn}/reports/*
+          - Effect: Allow
+            Action:
+            - pricing:GetProducts
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - sns:Publish
+            Resource:
+              Ref: ReportTopic
+  StarterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: Runtime
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:log-stream:*
+          - Effect: Allow
+            Action:
+            - states:StartExecution
+            Resource:
+              Ref: Workflow
+          - Effect: Allow
+            Action:
+            - sns:Publish
+            Resource:
+              Ref: HealthTopic
+  ScannerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-ScannerFunction
+      CodeUri: ../
+      Handler: orchestration.scanner_handler.handler
+      Runtime: python3.12
+      Architectures:
+      - x86_64
+      MemorySize: 512
+      Timeout: 270
+      Role:
+        Fn::GetAtt:
+        - ScannerRole
+        - Arn
+      Environment:
+        Variables:
+          REPORT_BUCKET:
+            Ref: ReportBucket
+          REPORT_PREFIX: reports
+          RUN_TABLE:
+            Ref: RunTable
+          SCAN_REGION:
+            Ref: AWS::Region
+          PRICING_MODE:
+            Ref: PricingMode
+          MIN_METRIC_COVERAGE: '0.9'
+          MIN_OBSERVATION_DAYS: '7'
+          SCAN_TIMEOUT_SECONDS: '240'
+          PRICING_TIMEOUT_SECONDS: '60'
+          S3_SSE:
+            Fn::If:
+            - HasKms
+            - aws:kms
+            - AES256
+          S3_KMS_KEY_ID:
+            Fn::If:
+            - HasKms
+            - Ref: KmsKeyArn
+            - ''
+          DEPLOYMENT_ID:
+            Ref: AWS::StackName
+          PRICING_JSON:
+            Ref: PricingJson
+          REQUIRED_TAGS:
+            Ref: RequiredTags
+          EXCLUDED_TAGS_JSON:
+            Ref: ExcludedTagsJson
+      ReservedConcurrentExecutions: 8
+      AutoPublishAlias: live
+      AutoPublishAliasAllProperties: true
+  ScannerFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}-ScannerFunction
+      RetentionInDays: 30
+  FinalizerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-FinalizerFunction
+      CodeUri: ../
+      Handler: orchestration.finalize_run.handler
+      Runtime: python3.12
+      Architectures:
+      - x86_64
+      MemorySize: 512
+      Timeout: 240
+      Role:
+        Fn::GetAtt:
+        - FinalizerRole
+        - Arn
+      Environment:
+        Variables:
+          REPORT_BUCKET:
+            Ref: ReportBucket
+          REPORT_PREFIX: reports
+          RUN_TABLE:
+            Ref: RunTable
+          SCAN_REGION:
+            Ref: AWS::Region
+          PRICING_MODE:
+            Ref: PricingMode
+          MIN_METRIC_COVERAGE: '0.9'
+          MIN_OBSERVATION_DAYS: '7'
+          SCAN_TIMEOUT_SECONDS: '240'
+          PRICING_TIMEOUT_SECONDS: '60'
+          S3_SSE:
+            Fn::If:
+            - HasKms
+            - aws:kms
+            - AES256
+          S3_KMS_KEY_ID:
+            Fn::If:
+            - HasKms
+            - Ref: KmsKeyArn
+            - ''
+          SNS_TOPIC_ARN:
+            Ref: ReportTopic
+          DEPLOYMENT_ID:
+            Ref: AWS::StackName
+          PRICING_JSON:
+            Ref: PricingJson
+          REQUIRED_TAGS:
+            Ref: RequiredTags
+          EXCLUDED_TAGS_JSON:
+            Ref: ExcludedTagsJson
+      ReservedConcurrentExecutions: 2
+      AutoPublishAlias: live
+      AutoPublishAliasAllProperties: true
+  FinalizerFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}-FinalizerFunction
+      RetentionInDays: 30
+  StarterFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-StarterFunction
+      CodeUri: ../
+      Handler: orchestration.start_run.handler
+      Runtime: python3.12
+      Architectures:
+      - x86_64
+      MemorySize: 512
+      Timeout: 30
+      Role:
+        Fn::GetAtt:
+        - StarterRole
+        - Arn
+      Environment:
+        Variables:
+          REPORT_BUCKET:
+            Ref: ReportBucket
+          REPORT_PREFIX: reports
+          RUN_TABLE:
+            Ref: RunTable
+          SCAN_REGION:
+            Ref: AWS::Region
+          PRICING_MODE:
+            Ref: PricingMode
+          MIN_METRIC_COVERAGE: '0.9'
+          MIN_OBSERVATION_DAYS: '7'
+          SCAN_TIMEOUT_SECONDS: '240'
+          PRICING_TIMEOUT_SECONDS: '60'
+          S3_SSE:
+            Fn::If:
+            - HasKms
+            - aws:kms
+            - AES256
+          S3_KMS_KEY_ID:
+            Fn::If:
+            - HasKms
+            - Ref: KmsKeyArn
+            - ''
+          STATE_MACHINE_ARN:
+            Ref: Workflow
+          DEPLOYMENT_ID:
+            Ref: AWS::StackName
+          PRICING_JSON:
+            Ref: PricingJson
+          REQUIRED_TAGS:
+            Ref: RequiredTags
+          EXCLUDED_TAGS_JSON:
+            Ref: ExcludedTagsJson
+      ReservedConcurrentExecutions: 2
+      Events:
+        Weekly:
+          Type: Schedule
+          Properties:
+            Schedule:
+              Ref: ScheduleExpression
+            DeadLetterConfig:
+              Type: SQS
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+              MaximumEventAgeInSeconds: 3600
+            State:
+              Fn::If:
+              - ScheduleOn
+              - ENABLED
+              - DISABLED
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 3600
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SNS
+            Destination:
+              Ref: HealthTopic
+  StarterFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}-StarterFunction
+      RetentionInDays: 30
+  WorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: InvokeTasks
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+            - Fn::Sub: ${ScannerFunction.Arn}:*
+            - Fn::Sub: ${FinalizerFunction.Arn}:*
+  Workflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      Role:
+        Fn::GetAtt:
+        - WorkflowRole
+        - Arn
+      DefinitionUri: workflow.asl.json
+      DefinitionSubstitutions:
+        Partition:
+          Ref: AWS::Partition
+        ScannerArn:
+          Ref: ScannerFunction.Version
+        FinalizerArn:
+          Ref: FinalizerFunction.Version
+  FailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWSWasteHunter
+      MetricName: RunsFailed
+      Dimensions:
+      - Name: Service
+        Value: waste-hunter
+      - Name: Deployment
+        Value:
+          Ref: AWS::StackName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  PartialAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWSWasteHunter
+      MetricName: RunsPartial
+      Dimensions:
+      - Name: Service
+        Value: waste-hunter
+      - Name: Deployment
+        Value:
+          Ref: AWS::StackName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  DeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWSWasteHunter
+      MetricName: DeliveryErrors
+      Dimensions:
+      - Name: Service
+        Value: waste-hunter
+      - Name: Deployment
+        Value:
+          Ref: AWS::StackName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  MissingCompletionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWSWasteHunter
+      MetricName: RunsCompleted
+      Dimensions:
+      - Name: Service
+        Value: waste-hunter
+      - Name: Deployment
+        Value:
+          Ref: AWS::StackName
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 8
+      DatapointsToAlarm: 8
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+      - Ref: HealthTopic
+  ExecutionFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+      - Name: StateMachineArn
+        Value:
+          Ref: Workflow
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  ReportSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasReportEmail
+    Properties:
+      TopicArn:
+        Ref: ReportTopic
+      Protocol: email
+      Endpoint:
+        Ref: ReportEmail
+  HealthSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasHealthEmail
+    Properties:
+      TopicArn:
+        Ref: HealthTopic
+      Protocol: email
+      Endpoint:
+        Ref: HealthEmail
+  ScannerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ScannerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  ScannerFunctionThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ScannerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  ScannerFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ScannerFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 243000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  FinalizerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: FinalizerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  FinalizerFunctionThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: FinalizerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  FinalizerFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: FinalizerFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 216000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  StarterFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: StarterFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  StarterFunctionThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: StarterFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  StarterFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: StarterFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 27000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+  ExecutionTimeoutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/States
+      MetricName: ExecutionsTimedOut
+      Dimensions:
+      - Name: StateMachineArn
+        Value:
+          Ref: Workflow
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: HealthTopic
+Outputs:
+  StateMachineArn:
+    Value:
+      Ref: Workflow
+  ReportBucket:
+    Value:
+      Ref: ReportBucket
+  ReportTopicArn:
+    Value:
+      Ref: ReportTopic
+  HealthTopicArn:
+    Value:
+      Ref: HealthTopic
+  StarterFunction:
+    Value:
+      Ref: StarterFunction

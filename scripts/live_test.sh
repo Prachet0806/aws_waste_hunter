@@ -1,21 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-if [[ -f ".env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source ".env"
-  set +a
-fi
-
-if [[ -z "${SNS_TOPIC_ARN:-}" ]]; then
-  echo "SNS_TOPIC_ARN is not set" >&2
-  exit 1
-fi
-
-if [[ -z "${REPORT_BUCKET:-}" ]]; then
-  echo "REPORT_BUCKET is not set" >&2
-  exit 1
-fi
-
-python -c "import lambda_handler; print(lambda_handler.handler({}, {}))"
+cd "$(dirname "$0")/.."
+: "${AWS_INTEGRATION_ENABLED:?explicit staging opt-in required}"
+: "${STAGING_ACCOUNT_ID:?designated staging account required}"
+: "${STAGING_REGION:?designated staging region required}"
+: "${STARTER_FUNCTION_NAME:?staging starter function required}"
+python -m pytest -m staging -o addopts=

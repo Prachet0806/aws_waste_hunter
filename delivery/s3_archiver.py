@@ -5,6 +5,7 @@ import os
 import uuid
 
 from utils.aws_factory import get_client
+from utils.scan_context import CURRENT
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,8 @@ _s3_client = None
 
 def _get_s3_client():
     """Lazy initialization of S3 client (delegates to shared factory)."""
+    if CURRENT.get():
+        return get_client("s3")
     global _s3_client
     if _s3_client is None:
         _s3_client = get_client("s3")
@@ -24,7 +27,7 @@ def reset_s3_client():
     _s3_client = None
 
 
-def archive_report(report):
+def archive_report(report, key=None):
     """Archive report to S3. Returns the object key."""
     bucket = os.environ.get("REPORT_BUCKET")
     if not bucket:
@@ -40,7 +43,7 @@ def archive_report(report):
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d-%H%M%S")
     prefix = os.environ.get("REPORT_PREFIX", "reports").strip("/") or "reports"
     request_id = os.environ.get("AWS_REQUEST_ID", "") or uuid.uuid4().hex[:8]
-    key = f"{prefix}/{timestamp}-{request_id}.md"
+    key = key or f"{prefix}/{timestamp}-{request_id}.md"
 
     sse = os.environ.get("S3_SSE", "AES256")
     kms_key = os.environ.get("S3_KMS_KEY_ID", "")
@@ -67,4 +70,15 @@ def archive_report(report):
         logger.error(f"S3 archive failed ({code or type(e).__name__}): {e}", exc_info=True)
         raise
     logger.info("Report archived successfully to S3")
+    return key
+
+
+def archive_json(value, key):
+    import json
+    bucket = os.environ['REPORT_BUCKET']
+    params = {"Bucket": bucket, "Key": key, "Body": json.dumps(value, allow_nan=False, default=str).encode(),
+              "ContentType": "application/json", "ServerSideEncryption": os.getenv("S3_SSE", "AES256")}
+    if os.getenv("S3_KMS_KEY_ID"):
+        params.update(ServerSideEncryption="aws:kms", SSEKMSKeyId=os.environ['S3_KMS_KEY_ID'])
+    _get_s3_client().put_object(**params)
     return key
