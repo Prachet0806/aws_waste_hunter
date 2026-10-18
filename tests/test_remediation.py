@@ -257,6 +257,15 @@ def test_unknown_alert_attribute_is_not_false():
     assert 'high_waste' not in _build_message_attributes({'high_waste':None})
 
 
+@pytest.mark.parametrize(('status','completed'), [('ok',1),('partial',0),('failed',0)])
+def test_completion_metric_counts_only_healthy_runs(capsys, status, completed):
+    from utils.logging_config import emit_metrics
+    emit_metrics({'status':status})
+    metric=json.loads(capsys.readouterr().out)
+    assert metric['RunsCompleted']==completed
+    assert metric['RunsFailed']==int(status=='failed')
+
+
 def test_failed_scan_report_does_not_claim_zero_money():
     from reporting.report_builder import build_report
     text = build_report([], None, [])

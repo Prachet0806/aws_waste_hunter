@@ -31,6 +31,22 @@ def test_client_failure_records_incomplete_operation():
     assert scope.operations['describe_addresses'] is False and scope.errors
 
 
+def test_scan_operation_details_are_explicit_and_failed_calls_stay_incomplete():
+    scope=ScanContext('test',Config.load())
+    tracked=TrackedClient(Mock(describe_addresses=Mock(return_value={'Addresses':[]})),scope)
+    tracked.describe_addresses()
+    result=scope.result([],0)
+    assert result['operations']=={'describe_addresses':True}
+    assert result['operation_details']['describe_addresses']=={'required':True,'attempts':1,'status':'complete'}
+    failed=ScanContext('test',Config.load())
+    client=TrackedClient(Mock(describe_volumes=Mock(side_effect=RuntimeError('denied'))),failed)
+    with pytest.raises(RuntimeError):
+        client.describe_volumes()
+    result=failed.result([],0)
+    assert result['discovery_complete'] is False
+    assert result['operation_details']['describe_volumes']['status']=='failed'
+
+
 def test_inventory_covers_active_instances_and_tag_updates():
     scope=ScanContext('inventory',Config.load(),'123456789012')
     tracked=TrackedClient(Mock(),scope)
@@ -64,6 +80,32 @@ def test_archives_use_explicit_keys_and_kms(monkeypatch):
     assert s3.put_object.call_args.kwargs['ContentType']=='application/json'
 
 
+def test_s3_idempotent_put_verifies_existing_object(monkeypatch):
+    from botocore.exceptions import ClientError
+    s3 = Mock()
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+    body = json.dumps({'run':'stable'}, allow_nan=False, default=str).encode()
+    import hashlib
+    digest = hashlib.sha256(body).hexdigest()
+    s3.put_object.side_effect = ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
+    s3.head_object.return_value = {'Metadata': {'waste-hunter-sha256': digest}}
+    assert s3_archiver.archive_json({'run':'stable'}, 'reports/run/manifest.json') == 'reports/run/manifest.json'
+    assert s3.put_object.call_args.kwargs['IfNoneMatch'] == '*'
+    s3.head_object.assert_called_once()
+
+
+def test_s3_idempotent_key_rejects_different_content(monkeypatch):
+    from botocore.exceptions import ClientError
+    s3 = Mock()
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+    s3.put_object.side_effect = ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
+    s3.head_object.return_value = {'Metadata': {'waste-hunter-sha256': 'different'}}
+    with pytest.raises(ValueError, match='different content'):
+        s3_archiver.archive_json({'run':'new'}, 'reports/run/manifest.json')
+
+
 @pytest.mark.parametrize('bucket', ['arn:aws:s3:::bucket','bucket/path'])
 def test_invalid_archive_bucket_rejected(monkeypatch,bucket):
     monkeypatch.setenv('REPORT_BUCKET',bucket)
@@ -94,6 +136,22 @@ def test_sns_topic_region_and_subject(monkeypatch):
     monkeypatch.setattr(sns_sender,'_sns_client',sns)
     sns_sender.send_report('full', {'status':'ok','high_waste':False,'compliance_percent':12.5,'no_metrics':1})
     assert '\n' not in sns.publish.call_args.kwargs['Subject']
+
+
+def test_sns_payload_has_stable_run_deduplication_key(monkeypatch):
+    monkeypatch.setenv('SNS_TOPIC_ARN', 'arn:aws:sns:us-east-1:123456789012:reports')
+    sns = Mock(publish=Mock(return_value={'MessageId':'id'}))
+    monkeypatch.setattr(sns_sender, '_sns_client', sns)
+    sns_sender.send_report('run run-123', {'run_id':'run-123','status':'ok'})
+    assert sns.publish.call_args.kwargs['MessageAttributes']['run_id']['StringValue']=='run-123'
+
+
+def test_sns_failure_is_visible_to_retry_caller(monkeypatch):
+    monkeypatch.setenv('SNS_TOPIC_ARN', 'arn:aws:sns:us-east-1:123456789012:reports')
+    sns = Mock(publish=Mock(side_effect=RuntimeError('publish failed')))
+    monkeypatch.setattr(sns_sender, '_sns_client', sns)
+    with pytest.raises(RuntimeError, match='publish failed'):
+        sns_sender.send_report('report', {'run_id':'run-123','status':'ok'})
 
 
 def test_configuration_and_price_snapshot_do_not_drift(monkeypatch):

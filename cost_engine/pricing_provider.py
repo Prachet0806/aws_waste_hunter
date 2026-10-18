@@ -1,5 +1,4 @@
 """Billable-component estimates; unknown values never become fabricated savings."""
-from datetime import datetime, timezone
 from decimal import Decimal
 import math
 from utils.schema import field
@@ -10,7 +9,7 @@ def estimate(resource, mode, lookup, config):
     region = resource.get("region")
     info = {"source": "static-approximation", "complete": True,
             "currency": "USD", "basis": "list-price-opportunity-not-realized-savings",
-            "fetched_at": datetime.now(timezone.utc).isoformat(), "components": [], "notes": []}
+            "components": [], "notes": []}
     if not region:
         return None, {**info, "complete": False, "source": "unknown", "notes": ["region missing"]}
 

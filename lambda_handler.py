@@ -175,7 +175,8 @@ def finalize(results, config, account_id, run_id, deadline=float('inf'), durable
                   'high_waste': total >= config.threshold if total is not None and (total >= config.threshold or not partial) else None,
                   'compliance_percent': stats['percent'] if stats else None,
                   'scan_errors': len(scan_errors), 'delivery_errors': 0,
-                  'scanner_outcomes': {r['scanner']: r['status'] for r in results}}
+                  'scanner_outcomes': {r['scanner']: r['status'] for r in results},
+                  'incomplete_scanners': sum(r['status'] != 'complete' for r in results)}
         if partial and result['status'] == 'ok':
             result['status'] = 'partial'
         try:

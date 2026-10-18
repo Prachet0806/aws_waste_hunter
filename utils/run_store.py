@@ -67,6 +67,8 @@ class RunStore:
 
     def release(self, run_id, stage, token):
         self.client.update_item(TableName=self.table, Key={"pk": {"S": f"{run_id}/{stage}"}},
-            UpdateExpression="SET lease = :zero, #status = :failed", ConditionExpression="#token = :token",
+            UpdateExpression="SET lease = :zero, #status = :failed",
+            ConditionExpression="#token = :token AND #status <> :complete",
             ExpressionAttributeNames={"#status": "status", "#token": "token"},
-            ExpressionAttributeValues={":zero": {"N": "0"}, ":failed": {"S": "retryable"}, ":token": {"S": token}})
+            ExpressionAttributeValues={":zero": {"N": "0"}, ":failed": {"S": "retryable"},
+                                       ":token": {"S": token}, ":complete": {"S": "complete"}})

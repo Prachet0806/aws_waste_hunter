@@ -116,6 +116,8 @@ The deployed workflow snapshots validated scan settings at execution start.
 `PRICING_MODE` selects `static` or `live`. `MIN_METRIC_COVERAGE` defaults to 0.9;
 `MIN_OBSERVATION_DAYS` defaults to seven. Exemptions are explicit tag/value rules.
 Inventory has a configurable cap and exceeding it marks incomplete coverage.
+Each attempted discovery API is recorded with its outcome. Metric calls with inadequate
+coverage make the scanner incomplete even when the API returned successfully.
 
 ## Results and artifacts
 
@@ -132,12 +134,30 @@ Scheduled invocation returns `accepted`, run_id and execution_arn, not a final r
 Manual `lambda_handler.handler` remains synchronous. This is an intentional interface
 change; migrate consumers to workflow output or the final manifest.
 
+Duplicate starter events return the existing execution state: running executions remain
+`accepted`, successful executions return `completed`, and failed/timed-out/aborted
+executions return `failed` with `redrive_required`. To deliberately run a fresh attempt,
+resend the original `idempotency_key` with a new unique `redrive_key`. Reusing the same
+redrive key is idempotent. A redrive gets a new run ID, artifacts and leases; it is a new
+full scan, not Step Functions' in-place redrive. DynamoDB stage acknowledgments are
+conditional and cached, while deterministic S3 report keys reject overwrites unless the
+existing content hash matches. SNS uses standard at-least-once delivery; consumers can
+deduplicate using the stable `run_id` message attribute.
+
+The stack's CloudWatch dashboard graphs run outcomes, findings and inventory counts,
+pricing coverage, scan/delivery errors and per-scanner failures. It measures candidates
+and pricing coverage; it does not yet record human acceptance, cleanup or realized savings.
+
 Artifacts are under `reports/<account>/<region>/<run_id>/`:
 
 - attempts/<scanner>/<lease>.json: immutable evidence for each attempt.
 - findings.json: full scanner outputs, priced findings and compliance.
 - report.md: complete ranked report, never truncated at 500 rows.
 - manifest.json: final delivery/application outcomes known when it was written.
+
+Finalization reads at most `MAX_FINALIZER_INPUT_BYTES` (1 KiB to 2 MiB total by default).
+Oversized artifacts are marked failed for that scanner and skipped, so finalization stays bounded
+and still reports the remaining scanner results.
 
 SNS receives a bounded summary with an exact S3 reference. Reports are generated before
 notification; their own future delivery outcome lives in the final manifest, not the report.

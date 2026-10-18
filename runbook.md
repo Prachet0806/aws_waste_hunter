@@ -26,6 +26,9 @@ The stack provisions failed/partial/delivery application alarms, workflow failur
 Lambda error/throttle/duration alarms, and missing completion after eight daily periods.
 Application metrics have Service and Deployment dimensions. Scanner metrics add a bounded
 Scanner dimension; run/resource IDs are log fields, never metric dimensions.
+The Operations dashboard shows those run, coverage, pricing and scanner-health metrics.
+It does not show realized savings or recommendation acceptance because no human feedback
+ingestion path exists yet.
 Confirm HealthEmail and ReportEmail subscriptions and exercise each alarm in staging.
 A disabled schedule can produce the missing-completion alarm; suppress that alarm during
 approved maintenance rather than silently considering the pipeline healthy.
@@ -58,9 +61,20 @@ acknowledging another attempt. Scanner and finalizer exceptions release owned le
 transient persistence errors retry with bounded backoff. Scanner analysis errors retain
 attempt evidence before retry. A release failure preserves the original error and lease expiry.
 An abrupt timeout can leave a lease until expiry; investigate before replaying.
-SNS can duplicate on publish/acknowledgment races; compare run_id before acting.
-To rerun a terminal failed execution, invoke the starter with a new idempotency_key.
-Repeating the same event identity returns the original Standard execution reference.
+SNS is standard at-least-once delivery and may duplicate after an ambiguous publish
+acknowledgment. The stable run_id message attribute lets automated subscribers deduplicate;
+human email subscribers should check the run ID before acting.
+
+Repeating the same event identity returns its current outcome. A terminal failed execution
+is reported as failed with redrive_required and is not acknowledged as a healthy duplicate.
+For an intentional fresh retry, invoke the starter with the same idempotency_key and a
+new unique redrive_key. That creates an independent run with new leases and artifacts;
+reusing that redrive_key returns the same execution. A successful duplicate returns
+completed and does not publish a second report.
+
+The finalizer checks artifact size before reading and has a configurable aggregate budget
+from 1 KiB to 2 MiB. Oversized artifacts become explicit failed scanner results while the
+finalizer continues with the remaining bounded artifacts and produces a partial report.
 
 ## Financial review
 

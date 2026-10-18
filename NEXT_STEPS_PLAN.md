@@ -7,9 +7,9 @@ locked production dependencies and regression/SDK-contract tests.
 
 ## Verified local evidence (2026-10-14)
 
-- Python 3.12.14 with the pinned runtime/development dependencies: 277 tests passed,
+- Python 3.12.14 with the pinned runtime/development dependencies: 291 tests passed,
   one explicitly opt-in deployed staging test skipped. Combined statement/branch
-  coverage was 83.00%, above the enforced 80% gate.
+  coverage was 83.21%, above the enforced 80% gate.
 - Essential Ruff correctness checks and git diff whitespace checks passed.
 - cfn-lint passed for the SAM template, including immutable task versions and alarms.
 - pip-audit found no known vulnerabilities in the full production dependency lock.
@@ -20,6 +20,22 @@ locked production dependencies and regression/SDK-contract tests.
 The Windows import check does not validate Linux native wheels. Docker's daemon is
 unavailable locally, so the Linux SAM build remains pending along with live AWS checks.
 CI defines those build/import checks; its remote execution has not been verified here.
+
+## Follow-up review items
+
+- Failed duplicate executions now report their terminal state. A fresh retry requires
+  the original idempotency key plus a new unique redrive key.
+- Finalizer reads have a 2 MiB aggregate cap; oversized artifacts are explicit failed
+  scanner outcomes and are not loaded into memory.
+- Each attempted discovery API records status, attempts and incomplete reasons. Missing
+  required calls and incomplete metric coverage mark the scanner incomplete.
+- Deterministic S3 writes, conditional DynamoDB stage acknowledgments, stable SNS run IDs,
+  and side-effect failure tests cover replay paths. Standard SNS remains at least once.
+- An operations dashboard tracks run outcomes, scan coverage, costs and scanner failures.
+- Human recommendation acceptance/rejection and realized savings lack an input workflow,
+  so outcome tracking remains pending.
+- Local tests and static checks pass. Linux SAM build, remote CI and AWS staging remain
+  pending; the user requested local checks only.
 
 Local source checks must be recorded from the current checkout, not inherited test counts.
 Run scripts/run_tests.ps1 or scripts/run_tests.sh, cfn-lint/SAM validation, dependency audit,

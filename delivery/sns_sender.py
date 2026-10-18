@@ -112,6 +112,10 @@ def _build_message_attributes(result):
     if "no_metrics" in result:
         add_number("no_metrics", result["no_metrics"])
 
+    # Stable event identity lets subscribers deduplicate at-least-once delivery.
+    if result.get("run_id"):
+        add_string("run_id", result["run_id"], 64)
+
     return attrs
 
 

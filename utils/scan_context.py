@@ -18,6 +18,7 @@ class ScanContext:
     errors: list = field(default_factory=list)
     skips: list = field(default_factory=list)
     operations: dict = field(default_factory=dict)
+    operation_details: dict = field(default_factory=dict)
     scan_window: dict = field(default_factory=dict)
 
     def check(self):
@@ -29,6 +30,21 @@ class ScanContext:
         retryable = code in ("Throttling", "ThrottlingException", "RequestLimitExceeded", "SlowDown", "InternalError", "ServiceUnavailable") or type(exc).__name__ in ("EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError")
         self.errors.append({"stage": stage, "type": type(exc).__name__, "error": str(exc)[:1000],
                             "code": code, "retryable": retryable})
+
+    def operation(self, name, status, reason=None):
+        """Record each required SDK operation; failures remain sticky per scan."""
+        detail = self.operation_details.setdefault(name, {"required": True, "attempts": 0})
+        if status == "running":
+            self.operations.setdefault(name, None)
+            detail["attempts"] += 1
+            detail["status"] = "running"
+            return
+        previous = self.operations.get(name)
+        complete = status == "complete" and previous is not False
+        self.operations[name] = complete
+        detail["status"] = "complete" if complete else (status if status != "complete" else "incomplete")
+        if reason:
+            detail["reason"] = str(reason)[:500]
 
     def skip(self, resource_id, reason):
         self.skips.append({"resource_id": resource_id, "reason": reason,
@@ -44,7 +60,7 @@ class ScanContext:
         self.inventory[key] = resource
 
     def result(self, findings, elapsed):
-        complete = not self.errors and all(self.operations.values())
+        complete = bool(self.operations) and not self.errors and all(self.operations.values())
         return {"schema_version": 2, "scanner": self.scanner,
                 "account_id": self.account_id, "region": self.config.region,
                 "status": "complete" if complete and not any(not s["intentional"] for s in self.skips) else "partial",
@@ -52,7 +68,8 @@ class ScanContext:
                 "inventory": list(self.inventory.values()), "scan_window": self.scan_window,
                 "discovered_count": len(self.inventory), "evaluated_count": max(0, len(self.inventory)-len(self.skips)),
                 "skipped_count": len(self.skips), "skip_reasons": self.skips,
-                "errors": self.errors, "operations": self.operations, "duration": elapsed}
+                "errors": self.errors, "operations": self.operations,
+                "operation_details": self.operation_details, "duration": elapsed}
 
 
 @contextmanager

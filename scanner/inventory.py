@@ -19,7 +19,7 @@ class TrackedPaginator:
     def paginate(self, **kwargs):
         context = self.client.context
         operation = self.operation
-        context.operations[operation] = False
+        context.operation(operation, "running")
         try:
             context.check()
             iterator = iter(self.client.raw.get_paginator(operation).paginate(**kwargs))
@@ -32,8 +32,9 @@ class TrackedPaginator:
                 context.check()
                 self.client.capture(operation, page)
                 yield page
-            context.operations[operation] = True
+            context.operation(operation, "complete")
         except Exception as exc:
+            context.operation(operation, "failed", str(exc))
             context.error(operation, exc)
             raise
 
@@ -51,10 +52,13 @@ class TrackedClient:
             return method
 
         def call(**kwargs):
-            if name in ("get_metric_data", "get_metric_statistics"):
-                self.context.scan_window = {"start": kwargs["StartTime"].isoformat(), "end": kwargs["EndTime"].isoformat()}
-            self.context.check()
+            tracks_operation = name.startswith(("describe_", "list_", "get_metric_"))
+            if tracks_operation:
+                self.context.operation(name, "running")
             try:
+                self.context.check()
+                if name in ("get_metric_data", "get_metric_statistics"):
+                    self.context.scan_window = {"start": kwargs["StartTime"].isoformat(), "end": kwargs["EndTime"].isoformat()}
                 response = method(**kwargs)
                 self.context.check()
                 self.capture(name, response)
@@ -62,11 +66,12 @@ class TrackedClient:
                     for resource in self.context.inventory.values():
                         if resource.get("arn") == kwargs.get("ResourceName"):
                             resource.update(tags=normalize_tags(response.get("TagList")), tags_status="known")
-                if name.startswith("describe_") or name.startswith("list_tags"):
-                    self.context.operations[name] = True
+                if tracks_operation:
+                    self.context.operation(name, "complete")
                 return response
             except Exception as exc:
-                self.context.operations[name] = False
+                if tracks_operation:
+                    self.context.operation(name, "failed", str(exc))
                 self.context.error(name, exc)
                 raise
         return call
@@ -98,10 +103,13 @@ class TrackedClient:
             if kind.startswith("RDS") and tags is None and arn:
                 try:
                     self.context.check()
+                    self.context.operation("list_tags_for_resource", "running")
                     tags = self.raw.list_tags_for_resource(ResourceName=arn).get("TagList", [])
                     item["TagList"] = tags
                     status = "known"
+                    self.context.operation("list_tags_for_resource", "complete")
                 except Exception as exc:
+                    self.context.operation("list_tags_for_resource", "failed", str(exc))
                     self.context.error("inventory-tags", exc)
             resource = build_resource(kind, rid, region=self.context.config.region, arn=arn, tags=tags)
             resource["tags_status"] = status

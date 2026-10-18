@@ -61,6 +61,9 @@ def collect(cloudwatch, queries, start, end, period):
         valid = key not in bad and coverage >= config.min_coverage and span >= config.min_observation_days
         output[key] = {"values": list(points.values()), "coverage": coverage,
                        "valid": valid, "start": start.isoformat(), "end": end.isoformat()}
+        if context and not valid:
+            context.operation("get_metric_data", "incomplete",
+                              f"{key}: coverage={coverage:.3f}, observation_days={span:.2f}")
     return output
 
 
@@ -82,8 +85,12 @@ def statistics(response, start, end):
     config = CURRENT.get().config if CURRENT.get() else Config.load()
     buckets = {int((t-start).total_seconds()//86400) for t in seen}
     expected = math.ceil((end-start).total_seconds()/86400)
-    return {"total": sum(seen.values()) if seen else None,
-            "complete": len(buckets)/max(1, expected) >= config.min_coverage}
+    complete = len(buckets)/max(1, expected) >= config.min_coverage
+    context = CURRENT.get()
+    if context and not complete:
+        context.operation("get_metric_statistics", "incomplete",
+                          f"daily coverage={len(buckets)/max(1, expected):.3f}")
+    return {"total": sum(seen.values()) if seen else None, "complete": complete}
 
 
 def window_end(period):

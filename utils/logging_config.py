@@ -36,11 +36,16 @@ def setup_logging(name=None, force=False):
 
 
 def emit_metrics(result):
-    values = {"RunsCompleted": 1, "RunsFailed": int(result['status'] == 'failed'),
+    values = {"RunsCompleted": int(result['status'] == 'ok'), "RunsFailed": int(result['status'] == 'failed'),
               "RunsPartial": int(result['status'] == 'partial'),
               "ScanErrors": result.get('scan_errors', 0), "DeliveryErrors": result.get('delivery_errors', 0),
               "UnpricedFindings": result.get('unpriced_resources', 0),
-              "PricingFallbacks": result.get('pricing_fallbacks', 0)}
+              "PricingFallbacks": result.get('pricing_fallbacks', 0),
+              "Resources": result.get('resources', 0),
+              "PricedResources": result.get('priced_resources', 0),
+              "InventoryResources": result.get('inventory_resources', 0),
+              "NoMetrics": result.get('no_metrics', 0),
+              "IncompleteScanners": result.get('incomplete_scanners', 0)}
     print(json.dumps({"_aws": {"Timestamp": int(time.time()*1000), "CloudWatchMetrics": [
         {"Namespace": "AWSWasteHunter", "Dimensions": [["Service", "Deployment"]],
          "Metrics": [{"Name": k, "Unit": "Count"} for k in values]}]},

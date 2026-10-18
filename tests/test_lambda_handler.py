@@ -63,5 +63,5 @@ def test_handler_high_waste_alert(monkeypatch):
     result = lambda_handler.handler({}, {})
 
     assert "high_waste" in result
-    assert isinstance(result["high_waste"], bool)
+    assert result["high_waste"] is None  # Mocked scanners did not provide required API-operation evidence.
     assert result["compliance_percent"] is not None

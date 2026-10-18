@@ -24,6 +24,7 @@ class Config:
     min_observation_days: float
     threshold: float
     max_resources: int
+    max_finalizer_total_bytes: int
     excluded_tags: dict
     cpu_threshold: float = 2
     network_threshold: float = 1000000
@@ -59,7 +60,8 @@ class Config:
                    number("MIN_METRIC_COVERAGE", .9, .5, 1),
                    number("MIN_OBSERVATION_DAYS", 7, 1, 7),
                    number("WASTE_ALERT_THRESHOLD", 1000),
-                   number("MAX_INVENTORY_RESOURCES", 100000, 1, integer=True), excluded,
+                   number("MAX_INVENTORY_RESOURCES", 100000, 1, integer=True),
+                   number("MAX_FINALIZER_INPUT_BYTES", 2*1024*1024, 1024, 2*1024*1024, True), excluded,
                    number("CPU_THRESHOLD", 2, maximum=100), number("NETWORK_THRESHOLD", 1000000),
                    number("RDS_CPU_THRESHOLD", 5, maximum=100),
                    number("RDS_CONNECTIONS_THRESHOLD", 1, integer=True),

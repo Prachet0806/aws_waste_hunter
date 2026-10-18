@@ -25,11 +25,38 @@ def test_start_event_identity_is_stable(monkeypatch):
 
 def test_duplicate_execution_returns_existing_reference(monkeypatch):
     class Exists(Exception): pass
-    states = Mock(exceptions=SimpleNamespace(ExecutionAlreadyExists=Exists))
+    states = Mock(exceptions=SimpleNamespace(ExecutionAlreadyExists=Exists),
+                  describe_execution=Mock(return_value={'status':'RUNNING'}))
     states.start_execution.side_effect = Exists()
     monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123456789012:stateMachine:test")
     monkeypatch.setattr(start_run, "get_client", lambda svc: states if svc=='stepfunctions' else Mock(get_caller_identity=Mock(return_value={"Account":"123456789012"})))
-    assert ':execution:test:' in start_run.handler({'id':'event'}, None)['execution_arn']
+    result = start_run.handler({'id':'event'}, None)
+    assert ':execution:test:' in result['execution_arn'] and result['status']=='accepted'
+
+
+@pytest.mark.parametrize(('state','expected'), [('SUCCEEDED','completed'),('FAILED','failed'),('TIMED_OUT','failed'),('ABORTED','failed')])
+def test_duplicate_execution_reports_terminal_state(monkeypatch, state, expected):
+    class Exists(Exception): pass
+    states = Mock(exceptions=SimpleNamespace(ExecutionAlreadyExists=Exists),
+                  describe_execution=Mock(return_value={'status':state}))
+    states.start_execution.side_effect = Exists()
+    monkeypatch.setenv('STATE_MACHINE_ARN', 'arn:aws:states:us-east-1:123456789012:stateMachine:test')
+    monkeypatch.setattr(start_run, 'get_client', lambda svc: states if svc=='stepfunctions' else Mock(get_caller_identity=Mock(return_value={'Account':'123456789012'})))
+    result = start_run.handler({'id':'event'}, None)
+    assert result['status']==expected
+    if state in {'FAILED','TIMED_OUT','ABORTED'}:
+        assert result['redrive_required'] is True
+
+
+def test_redrive_key_creates_stable_new_execution_identity(monkeypatch):
+    states = Mock(start_execution=Mock(return_value={'executionArn':'execution'}))
+    monkeypatch.setenv('STATE_MACHINE_ARN', 'arn:aws:states:us-east-1:123456789012:stateMachine:test')
+    monkeypatch.setattr(start_run, 'get_client', lambda svc: states if svc=='stepfunctions' else Mock(get_caller_identity=Mock(return_value={'Account':'123456789012'})))
+    first = start_run.handler({'id':'event','redrive_key':'retry-1'}, None)
+    payload = json.loads(states.start_execution.call_args.kwargs['input'])
+    second = start_run.handler({'id':'event','redrive_key':'retry-1'}, None)
+    assert first['run_id']==second['run_id']==payload['run_id']
+    assert first['run_id'] != start_run.handler({'id':'event'}, None)['run_id']
 
 
 def test_scanner_artifact_precedes_acknowledgment(monkeypatch):
@@ -70,7 +97,9 @@ def test_finalizer_reads_scoped_artifacts_and_catches_task_failure(monkeypatch):
     store = Mock(acquire=Mock(return_value=('lease', None)))
     monkeypatch.setattr(finalize_run, 'RunStore', lambda: store)
     monkeypatch.setenv('REPORT_BUCKET', 'reports')
-    s3 = Mock(get_object=Mock(return_value={'Body':io.BytesIO(json.dumps({'scanner':'one','status':'complete','inventory':[],'findings':[],'errors':[]}).encode())}))
+    content = json.dumps({'scanner':'one','status':'complete','inventory':[],'findings':[],'errors':[]}).encode()
+    s3 = Mock(head_object=Mock(return_value={'ContentLength':len(content)}),
+              get_object=Mock(return_value={'Body':io.BytesIO(content)}))
     monkeypatch.setattr(finalize_run, 'get_client', lambda svc:s3)
     finish = Mock(return_value={'status':'partial'})
     monkeypatch.setattr(finalize_run, 'finalize', finish)
@@ -90,6 +119,19 @@ def test_foreign_artifact_rejected(monkeypatch):
         finalize_run.handler(ev, None)
 
 
+def test_finalizer_skips_oversized_artifact_without_reading_body(monkeypatch):
+    store = Mock(acquire=Mock(return_value=('lease',None)))
+    monkeypatch.setattr(finalize_run,'RunStore',lambda:store)
+    monkeypatch.setenv('REPORT_BUCKET','reports')
+    s3 = Mock(head_object=Mock(return_value={'ContentLength':9*1024*1024}))
+    monkeypatch.setattr(finalize_run,'get_client',lambda _:s3)
+    monkeypatch.setattr(finalize_run,'finalize',lambda results,*args,**kwargs:results)
+    ev=event(); ev['outputs']=[{'scanner':'large','bucket':'reports','key':'reports/123456789012/us-east-1/run/attempts/large/attempt.json'}]
+    output=finalize_run.handler(ev,SimpleNamespace(get_remaining_time_in_millis=lambda:240000))
+    assert output[0]['status']=='failed' and output[0]['errors'][0]['type']=='ArtifactSizeLimit'
+    s3.get_object.assert_not_called()
+
+
 def test_conditional_run_store_cache_and_lease(monkeypatch):
     class Conflict(Exception): pass
     client=Mock(exceptions=SimpleNamespace(ConditionalCheckFailedException=Conflict))
@@ -99,6 +141,8 @@ def test_conditional_run_store_cache_and_lease(monkeypatch):
     assert token and prior is None
     store.finish('run','stage',token,{'status':'complete'})
     assert client.update_item.call_args.kwargs['ConditionExpression']=='#token = :token'
+    store.release('run','stage',token)
+    assert client.update_item.call_args.kwargs['ConditionExpression']=='#token = :token AND #status <> :complete'
     client.put_item.side_effect=Conflict()
     client.get_item.return_value={'Item':{'status':{'S':'complete'},'result':{'S':'{"status":"complete"}'}}}
     assert store.acquire('run','stage')==(None,{'status':'complete'})
@@ -123,6 +167,8 @@ def test_artifact_build_allowlist_and_workflow_contract(tmp_path):
     assert 'AWS_REGION' not in template['Resources']['ScannerFunction']['Properties']['Environment']['Variables']
     statements=template['Resources']['FinalizerRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
     assert next(s for s in statements if 'sns:Publish' in s.get('Action', []))['Resource']=={'Ref':'ReportTopic'}
+    assert 'OperationsDashboard' in template['Resources']
+    assert template['Parameters']['FinalizerInputBytes']['MaxValue']==2097152
 
 
 def test_finalizer_read_failure_releases_lease_for_transient_retry(monkeypatch):
@@ -132,6 +178,7 @@ def test_finalizer_read_failure_releases_lease_for_transient_retry(monkeypatch):
     monkeypatch.setattr(finalize_run, 'RunStore', lambda: store)
     monkeypatch.setenv('REPORT_BUCKET', 'reports')
     client = Mock()
+    client.head_object.return_value = {'ContentLength': 1}
     client.get_object.side_effect = ClientError({'Error': {'Code': 'SlowDown'}}, 'GetObject')
     monkeypatch.setattr(finalize_run, 'get_client', lambda svc: client)
     ev = event()

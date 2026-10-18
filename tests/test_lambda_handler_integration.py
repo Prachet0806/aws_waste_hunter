@@ -236,7 +236,7 @@ class TestHandlerIntegration:
 
         result = lambda_handler.handler({}, {})
 
-        assert result["status"] == "ok"
+        assert result["status"] == "partial"  # Empty mocks do not attest to complete discovery.
         assert result["resources"] == 0
         assert result["monthly_waste"] == 0
         assert result["scan_errors"] == 0

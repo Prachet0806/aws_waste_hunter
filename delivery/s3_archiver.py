@@ -1,5 +1,6 @@
 # delivery/s3_archiver.py
 import datetime
+import hashlib
 import logging
 import os
 import uuid
@@ -27,6 +28,23 @@ def reset_s3_client():
     _s3_client = None
 
 
+def _put_once(s3, bucket, key, body, content_type, extra=None):
+    """Create deterministic artifacts once, and verify the winner on retries."""
+    metadata = {"waste-hunter-sha256": hashlib.sha256(body).hexdigest()}
+    params = {"Bucket": bucket, "Key": key, "Body": body, "ContentType": content_type,
+              "Metadata": metadata, "IfNoneMatch": "*", **(extra or {})}
+    try:
+        s3.put_object(**params)
+    except Exception as exc:
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if code not in {"PreconditionFailed", "412", "ConditionalRequestConflict"}:
+            raise
+        existing = s3.head_object(Bucket=bucket, Key=key)
+        if existing.get("Metadata", {}).get("waste-hunter-sha256") != metadata["waste-hunter-sha256"]:
+            raise ValueError("Idempotent S3 key already contains different content") from exc
+    return key
+
+
 def archive_report(report, key=None):
     """Archive report to S3. Returns the object key."""
     bucket = os.environ.get("REPORT_BUCKET")
@@ -47,24 +65,20 @@ def archive_report(report, key=None):
 
     sse = os.environ.get("S3_SSE", "AES256")
     kms_key = os.environ.get("S3_KMS_KEY_ID", "")
-    put_kwargs = {
-        "Bucket": bucket,
-        "Key": key,
-        "Body": report.encode("utf-8"),
-        "ContentType": "text/markdown",
-    }
+    body = report.encode("utf-8")
+    extra = {}
     if kms_key:
-        put_kwargs["ServerSideEncryption"] = "aws:kms"
-        put_kwargs["SSEKMSKeyId"] = kms_key
+        extra["ServerSideEncryption"] = "aws:kms"
+        extra["SSEKMSKeyId"] = kms_key
     elif sse:
-        put_kwargs["ServerSideEncryption"] = sse
+        extra["ServerSideEncryption"] = sse
     storage_class = os.environ.get("S3_STORAGE_CLASS", "")
     if storage_class:
-        put_kwargs["StorageClass"] = storage_class
+        extra["StorageClass"] = storage_class
 
     logger.info(f"Archiving report to s3://{bucket}/{key}")
     try:
-        s3.put_object(**put_kwargs)
+        _put_once(s3, bucket, key, body, "text/markdown", extra)
     except Exception as e:
         code = getattr(e, "response", {}).get("Error", {}).get("Code", "") if hasattr(e, "response") else ""
         logger.error(f"S3 archive failed ({code or type(e).__name__}): {e}", exc_info=True)
@@ -76,9 +90,8 @@ def archive_report(report, key=None):
 def archive_json(value, key):
     import json
     bucket = os.environ['REPORT_BUCKET']
-    params = {"Bucket": bucket, "Key": key, "Body": json.dumps(value, allow_nan=False, default=str).encode(),
-              "ContentType": "application/json", "ServerSideEncryption": os.getenv("S3_SSE", "AES256")}
+    body = json.dumps(value, allow_nan=False, default=str).encode()
+    extra = {"ServerSideEncryption": os.getenv("S3_SSE", "AES256")}
     if os.getenv("S3_KMS_KEY_ID"):
-        params.update(ServerSideEncryption="aws:kms", SSEKMSKeyId=os.environ['S3_KMS_KEY_ID'])
-    _get_s3_client().put_object(**params)
-    return key
+        extra.update(ServerSideEncryption="aws:kms", SSEKMSKeyId=os.environ['S3_KMS_KEY_ID'])
+    return _put_once(_get_s3_client(), bucket, key, body, "application/json", extra)

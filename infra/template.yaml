@@ -21,6 +21,11 @@ Parameters:
     Type: Number
     Default: 365
     MinValue: 30
+  FinalizerInputBytes:
+    Type: Number
+    Default: 2097152
+    MinValue: 1024
+    MaxValue: 2097152
   KmsKeyArn:
     Type: String
     Default: ''
@@ -172,6 +177,11 @@ Resources:
             - s3:PutObject
             Resource:
               Fn::Sub: ${ReportBucket.Arn}/reports/*
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${ReportBucket.Arn}/reports/*/attempts/*
           - Fn::If:
             - HasKms
             - Effect: Allow
@@ -293,6 +303,11 @@ Resources:
             - states:StartExecution
             Resource:
               Ref: Workflow
+          - Effect: Allow
+            Action:
+            - states:DescribeExecution
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-Workflow:*
           - Effect: Allow
             Action:
             - sns:Publish
@@ -465,6 +480,8 @@ Resources:
             - ''
           STATE_MACHINE_ARN:
             Ref: Workflow
+          MAX_FINALIZER_INPUT_BYTES:
+            Ref: FinalizerInputBytes
           DEPLOYMENT_ID:
             Ref: AWS::StackName
           PRICING_JSON:
@@ -528,6 +545,8 @@ Resources:
   Workflow:
     Type: AWS::Serverless::StateMachine
     Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-Workflow
       Type: STANDARD
       Role:
         Fn::GetAtt:
@@ -823,6 +842,21 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
       - Ref: HealthTopic
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName:
+        Fn::Sub: ${AWS::StackName}-Operations
+      DashboardBody:
+        Fn::Sub: |
+          {
+            "widgets": [
+              {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"Run outcomes","region":"${AWS::Region}","view":"timeSeries","stacked":false,"metrics":[["AWSWasteHunter","RunsCompleted","Service","waste-hunter","Deployment","${AWS::StackName}",{"stat":"Sum","label":"Completed"}],[".","RunsPartial",".",".",".",".",{"stat":"Sum","label":"Partial"}],[".","RunsFailed",".",".",".",".",{"stat":"Sum","label":"Failed"}],[".","IncompleteScanners",".",".",".",".",{"stat":"Sum","label":"Incomplete scans"}]]}},
+              {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"Finding coverage","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWSWasteHunter","Resources","Service","waste-hunter","Deployment","${AWS::StackName}",{"stat":"Sum","label":"Candidates"}],[".","InventoryResources",".",".",".",".",{"stat":"Sum","label":"Inventory"}],[".","PricedResources",".",".",".",".",{"stat":"Sum","label":"Priced"}],[".","UnpricedFindings",".",".",".",".",{"stat":"Sum","label":"Unpriced"}],[".","NoMetrics",".",".",".",".",{"stat":"Sum","label":"Missing metrics"}]]}},
+              {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Errors and delivery","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWSWasteHunter","ScanErrors","Service","waste-hunter","Deployment","${AWS::StackName}",{"stat":"Sum"}],[".","DeliveryErrors",".",".",".",".",{"stat":"Sum"}],[".","PricingFallbacks",".",".",".",".",{"stat":"Sum"}]]}},
+              {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"Scanner reliability","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWSWasteHunter","ScannerFailures","Service","waste-hunter","Deployment","${AWS::StackName}","Scanner","scan_unattached_ebs",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_idle_ec2",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_unused_elb",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_stopped_rds",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_idle_rds",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_unattached_eips",{"stat":"Sum"}],[".","ScannerFailures",".",".",".",".",".","scan_orphaned_snapshots",{"stat":"Sum"}]]}}
+            ]
+          }
 Outputs:
   StateMachineArn:
     Value:
