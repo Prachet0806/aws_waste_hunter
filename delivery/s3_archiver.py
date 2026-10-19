@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import logging
 import os
+import time
 import uuid
 
 from utils.aws_factory import get_client
@@ -11,6 +12,7 @@ from utils.scan_context import CURRENT
 logger = logging.getLogger(__name__)
 
 _s3_client = None
+S3_CONFLICT_MAX_ATTEMPTS = 3
 
 
 def _get_s3_client():
@@ -33,16 +35,28 @@ def _put_once(s3, bucket, key, body, content_type, extra=None):
     metadata = {"waste-hunter-sha256": hashlib.sha256(body).hexdigest()}
     params = {"Bucket": bucket, "Key": key, "Body": body, "ContentType": content_type,
               "Metadata": metadata, "IfNoneMatch": "*", **(extra or {})}
-    try:
-        s3.put_object(**params)
-    except Exception as exc:
-        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
-        if code not in {"PreconditionFailed", "412", "ConditionalRequestConflict"}:
-            raise
-        existing = s3.head_object(Bucket=bucket, Key=key)
-        if existing.get("Metadata", {}).get("waste-hunter-sha256") != metadata["waste-hunter-sha256"]:
-            raise ValueError("Idempotent S3 key already contains different content") from exc
-    return key
+    for attempt in range(S3_CONFLICT_MAX_ATTEMPTS):
+        try:
+            s3.put_object(**params)
+            return key
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code not in {"PreconditionFailed", "412", "ConditionalRequestConflict"}:
+                raise
+            try:
+                existing = s3.head_object(Bucket=bucket, Key=key)
+            except Exception as head_error:
+                head_code = getattr(head_error, "response", {}).get("Error", {}).get("Code", "")
+                object_not_visible = head_code in {"404", "NoSuchKey", "NotFound"}
+                can_retry_race = code == "ConditionalRequestConflict" and object_not_visible
+                if not can_retry_race or attempt + 1 == S3_CONFLICT_MAX_ATTEMPTS:
+                    raise exc from head_error
+                time.sleep(min(0.05 * (2 ** attempt), 0.2))
+                continue
+            if existing.get("Metadata", {}).get("waste-hunter-sha256") != metadata["waste-hunter-sha256"]:
+                raise ValueError("Idempotent S3 key already contains different content") from exc
+            return key
+    raise RuntimeError("S3 conditional write attempts exhausted")
 
 
 def archive_report(report, key=None):
@@ -87,10 +101,12 @@ def archive_report(report, key=None):
     return key
 
 
-def archive_json(value, key):
+def archive_json(value, key, *, on_encoded=None):
     import json
     bucket = os.environ['REPORT_BUCKET']
     body = json.dumps(value, allow_nan=False, default=str).encode()
+    if on_encoded is not None:
+        on_encoded(len(body))
     extra = {"ServerSideEncryption": os.getenv("S3_SSE", "AES256")}
     if os.getenv("S3_KMS_KEY_ID"):
         extra.update(ServerSideEncryption="aws:kms", SSEKMSKeyId=os.environ['S3_KMS_KEY_ID'])

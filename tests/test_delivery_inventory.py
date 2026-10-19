@@ -1,12 +1,14 @@
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
+
 import pytest
+
+from delivery import s3_archiver, sns_sender
+from scanner.inventory import TrackedClient
+from utils import aws_factory
 from utils.config import Config
 from utils.scan_context import ScanContext, activate
-from utils import aws_factory
-from scanner.inventory import TrackedClient
-from delivery import s3_archiver, sns_sender
 
 
 def test_factory_uses_task_snapshot_and_reuses_client(monkeypatch):
@@ -80,6 +82,30 @@ def test_archives_use_explicit_keys_and_kms(monkeypatch):
     assert s3.put_object.call_args.kwargs['ContentType']=='application/json'
 
 
+def test_json_archive_reports_the_exact_encoded_size(monkeypatch):
+    s3 = Mock()
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+    measured = []
+    value = {'scanner': 'scan_unattached_eips', 'inventory': [{'id': 'eipalloc-123'}]}
+
+    s3_archiver.archive_json(value, 'reports/run/attempt.json', on_encoded=measured.append)
+
+    body = s3.put_object.call_args.kwargs['Body']
+    assert measured == [len(body)]
+    assert json.loads(body) == value
+
+
+def test_scanner_artifact_size_is_emitted_as_a_metric(capsys):
+    from utils.logging_config import emit_scanner_metrics
+
+    emit_scanner_metrics({'scanner': 'scan_unattached_eips', 'status': 'complete'}, 12345)
+    metric = json.loads(capsys.readouterr().out)
+
+    assert metric['ScannerArtifactBytes'] == 12345
+    assert {'Name': 'ScannerArtifactBytes', 'Unit': 'Bytes'} in metric['_aws']['CloudWatchMetrics'][0]['Metrics']
+
+
 def test_s3_idempotent_put_verifies_existing_object(monkeypatch):
     from botocore.exceptions import ClientError
     s3 = Mock()
@@ -104,6 +130,76 @@ def test_s3_idempotent_key_rejects_different_content(monkeypatch):
     s3.head_object.return_value = {'Metadata': {'waste-hunter-sha256': 'different'}}
     with pytest.raises(ValueError, match='different content'):
         s3_archiver.archive_json({'run':'new'}, 'reports/run/manifest.json')
+
+
+def test_s3_conditional_conflict_retries_when_winner_is_not_yet_readable(monkeypatch):
+    from botocore.exceptions import ClientError
+    conflict = ClientError({'Error': {'Code': 'ConditionalRequestConflict'}}, 'PutObject')
+    not_visible = ClientError({'Error': {'Code': 'NoSuchKey'}}, 'HeadObject')
+    s3 = Mock(put_object=Mock(side_effect=[conflict, {}]), head_object=Mock(side_effect=not_visible))
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setattr(s3_archiver.time, 'sleep', Mock())
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+
+    assert s3_archiver.archive_json({'run': 'stable'}, 'reports/run/manifest.json') == 'reports/run/manifest.json'
+    assert s3.put_object.call_count == 2
+    assert s3.head_object.call_count == 1
+
+
+def test_s3_conditional_conflict_retries_are_bounded(monkeypatch):
+    from botocore.exceptions import ClientError
+    conflict = ClientError({'Error': {'Code': 'ConditionalRequestConflict'}}, 'PutObject')
+    not_visible = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+    s3 = Mock(put_object=Mock(side_effect=conflict), head_object=Mock(side_effect=not_visible))
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setattr(s3_archiver.time, 'sleep', Mock())
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+
+    with pytest.raises(ClientError) as raised:
+        s3_archiver.archive_json({'run': 'stable'}, 'reports/run/manifest.json')
+    assert raised.value.response['Error']['Code'] == 'ConditionalRequestConflict'
+    assert s3.put_object.call_count == s3_archiver.S3_CONFLICT_MAX_ATTEMPTS
+    assert s3.head_object.call_count == s3_archiver.S3_CONFLICT_MAX_ATTEMPTS
+
+
+def test_simultaneous_s3_writers_share_the_same_idempotent_object(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from botocore.exceptions import ClientError
+
+    class ConcurrentS3:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.barrier = threading.Barrier(2)
+            self.objects = {}
+            self.puts = 0
+            self.heads = 0
+
+        def put_object(self, **params):
+            self.barrier.wait(timeout=5)
+            with self.lock:
+                self.puts += 1
+                if params['Key'] in self.objects:
+                    raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
+                self.objects[params['Key']] = params['Metadata']
+
+        def head_object(self, **params):
+            with self.lock:
+                self.heads += 1
+                return {'Metadata': self.objects[params['Key']]}
+
+    s3 = ConcurrentS3()
+    monkeypatch.setattr(s3_archiver, '_s3_client', s3)
+    monkeypatch.setenv('REPORT_BUCKET', 'reports')
+    key = 'reports/run/manifest.json'
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: s3_archiver.archive_json({'run': 'same'}, key), range(2)))
+
+    assert results == [key, key]
+    assert s3.puts == 2 and s3.heads == 1
+    assert len(s3.objects) == 1
 
 
 @pytest.mark.parametrize('bucket', ['arn:aws:s3:::bucket','bucket/path'])

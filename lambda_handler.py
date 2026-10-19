@@ -5,22 +5,24 @@ import math
 import os
 import time
 import uuid
+
+from compliance.tag_checker import check_tag_compliance, compute_compliance_stats
+from cost_engine.estimator import estimate_monthly_waste
+from delivery.s3_archiver import archive_json, archive_report
+from delivery.sns_sender import send_report
+from reporting.report_builder import build_notification, build_report
+from scanner.ebs_scanner import scan_unattached_ebs
+from scanner.ec2_scanner import get_no_metrics_count, scan_idle_ec2
+from scanner.eip_scanner import scan_unattached_eips
+from scanner.elb_scanner import scan_unused_elb
+from scanner.rds_idle_scanner import scan_idle_rds
+from scanner.rds_scanner import scan_stopped_rds
+from scanner.snapshot_scanner import scan_orphaned_snapshots
 from utils.config import Config
+from utils.logging_config import setup_logging
+from utils.run_store import is_transient_stage_error
 from utils.scan_context import ScanContext, activate, protected
 from utils.schema import resource_identity
-from utils.logging_config import setup_logging
-from scanner.ebs_scanner import scan_unattached_ebs
-from scanner.ec2_scanner import scan_idle_ec2, get_no_metrics_count
-from scanner.elb_scanner import scan_unused_elb
-from scanner.rds_scanner import scan_stopped_rds
-from scanner.rds_idle_scanner import scan_idle_rds
-from scanner.eip_scanner import scan_unattached_eips
-from scanner.snapshot_scanner import scan_orphaned_snapshots
-from cost_engine.estimator import estimate_monthly_waste
-from compliance.tag_checker import check_tag_compliance, compute_compliance_stats
-from reporting.report_builder import build_report, build_notification
-from delivery.sns_sender import send_report
-from delivery.s3_archiver import archive_report, archive_json
 
 logger = setup_logging(__name__)
 DEFAULT_WASTE_ALERT_THRESHOLD = 1000.0
@@ -111,11 +113,13 @@ def _safe_scan(name, func, errors):
     return result['findings']
 
 
-def _safe_deliver(name, func, report, errors):
+def _safe_deliver(name, func, report, errors, *, retry_transient=False):
     try:
         func(report)
         return True
     except Exception as exc:
+        if retry_transient and is_transient_stage_error(exc):
+            raise
         errors.append({'stage': name, 'type': type(exc).__name__, 'error': str(exc)[:1000]})
         return False
 
@@ -203,12 +207,15 @@ def finalize(results, config, account_id, run_id, deadline=float('inf'), durable
                 archive_uri = f"s3://{os.getenv('REPORT_BUCKET', '')}/{key}"
                 archived = True
             except Exception as exc:
+                if durable and is_transient_stage_error(exc):
+                    raise
                 delivery_errors.append({'stage': 'archive_report', 'type': type(exc).__name__, 'error': str(exc)[:1000]})
             if not archived:
                 result['status'] = 'partial' if successes else 'failed'
             result['delivery_errors'] = len(delivery_errors)
             notified = _safe_deliver('send_report', lambda text: send_report(text, result),
-                                    build_notification(result, archive_uri), delivery_errors)
+                                    build_notification(result, archive_uri), delivery_errors,
+                                    retry_transient=durable)
         result.update(archive_uri=archive_uri, delivery_errors=len(delivery_errors), scan_errors=len(scan_errors),
                       delivery={'archive': archived, 'notification': notified})
         if report is None or successes == 0 or not (archived or notified):
@@ -219,6 +226,8 @@ def finalize(results, config, account_id, run_id, deadline=float('inf'), durable
             try:
                 archive_json({'result': result, 'scan_errors': scan_errors, 'delivery_errors': delivery_errors}, base+'/manifest.json')
             except Exception as exc:
+                if is_transient_stage_error(exc):
+                    raise
                 result.update(status='failed', manifest_error=str(exc)[:1000])
         from utils.logging_config import emit_metrics
         emit_metrics(result)

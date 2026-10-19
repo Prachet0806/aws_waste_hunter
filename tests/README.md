@@ -6,6 +6,13 @@ models. Metric fixtures carry real timestamped histories; short/missing historie
 as insufficient evidence. Regression tests cover the audit's classification, pricing, status,
 archive, size-accounting, identity, lease and workflow failures.
 
+Finalizer size profiles generate scanner-shaped inventory records for 10 resources × 7 scanners,
+1,000 × 7, and 10,000 × 1. They serialize to 23,121 B, 2,150,631 B, and 3,070,233 B respectively;
+the latter two exceed the 2 MiB aggregate cap. These are deterministic synthetic bounds, not
+measurements from customer accounts. Scanner `ScannerArtifactBytes` and per-run
+`FinalizerInputBytes`/`ArtifactSizeRejections` metrics support deployed sizing; use those real
+distributions before changing the cap.
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest --cov --cov-branch --cov-report=term-missing --cov-fail-under=80

@@ -52,11 +52,22 @@ def emit_metrics(result):
         "Service": "waste-hunter", "Deployment": os.getenv("DEPLOYMENT_ID", "local"), "run_id": result.get('run_id'), **values}, allow_nan=False))
 
 
-def emit_scanner_metrics(result):
+def emit_scanner_metrics(result, artifact_bytes=0):
     print(json.dumps({"_aws":{"Timestamp":int(time.time()*1000),"CloudWatchMetrics":[{
         "Namespace":"AWSWasteHunter","Dimensions":[["Service","Deployment","Scanner"]],
         "Metrics":[{"Name":"ScannerDuration","Unit":"Seconds"},{"Name":"ScannerFailures","Unit":"Count"},
+                   {"Name":"ScannerArtifactBytes","Unit":"Bytes"},
                    {"Name":"SkippedResources","Unit":"Count"}]}]},
         "Service":"waste-hunter","Deployment":os.getenv("DEPLOYMENT_ID","local"),"Scanner":result['scanner'],
         "ScannerDuration":result.get('duration',0),"ScannerFailures":int(result['status']=='failed'),
-        "SkippedResources":result.get('skipped_count',0)},allow_nan=False))
+        "ScannerArtifactBytes":artifact_bytes,"SkippedResources":result.get('skipped_count',0)},allow_nan=False))
+
+
+def emit_finalizer_metrics(input_bytes, size_rejections):
+    """Publish per-run artifact volume and budget rejects for capacity planning."""
+    print(json.dumps({"_aws":{"Timestamp":int(time.time()*1000),"CloudWatchMetrics":[{
+        "Namespace":"AWSWasteHunter","Dimensions":[["Service","Deployment"]],
+        "Metrics":[{"Name":"FinalizerInputBytes","Unit":"Bytes"},
+                   {"Name":"ArtifactSizeRejections","Unit":"Count"}]}]},
+        "Service":"waste-hunter","Deployment":os.getenv("DEPLOYMENT_ID","local"),
+        "FinalizerInputBytes":input_bytes,"ArtifactSizeRejections":size_rejections},allow_nan=False))

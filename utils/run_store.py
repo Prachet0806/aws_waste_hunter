@@ -5,11 +5,24 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
+
 from utils.aws_factory import get_client
 
 
 class RetryableStageError(RuntimeError):
     """A transient persistence failure after the owned lease was released."""
+
+
+def is_transient_stage_error(exc):
+    """Classify retryable AWS and transport errors shared by stage side effects."""
+    response = getattr(exc, "response", {})
+    code = response.get("Error", {}).get("Code", "") if isinstance(response, dict) else ""
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode") if isinstance(response, dict) else None
+    return (code in {"Throttling", "ThrottlingException", "RequestLimitExceeded", "SlowDown",
+                     "InternalError", "InternalServerError", "ServiceUnavailable", "RequestTimeout",
+                     "RequestTimeoutException", "ConditionalRequestConflict"}
+            or status in {429, 500, 502, 503, 504}
+            or type(exc).__name__ in {"EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError"})
 
 
 @contextmanager
@@ -24,12 +37,7 @@ def release_on_failure(store, run_id, stage, token):
             logging.getLogger(__name__).exception("Could not release failed stage lease")
             # Retain the original failure; the lease remains safe until expiry.
             raise exc
-        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
-        transient = code in {"Throttling", "ThrottlingException", "RequestLimitExceeded", "SlowDown",
-                             "InternalError", "InternalServerError", "ServiceUnavailable", "RequestTimeout"}
-        transient = transient or type(exc).__name__ in {
-            "EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError"}
-        if transient:
+        if is_transient_stage_error(exc):
             raise RetryableStageError("Transient persistence failure; stage lease released") from exc
         raise
 

@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AWS Waste Hunter Workflow",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "start-and-dispatch", "label": "Start and dispatch", "focus": ["schedule", "starter", "state_machine", "scanner"], "note": "See event deduplication, run creation, and bounded parallel scanner dispatch." },
+      { "id": "discover-and-evidence", "label": "Discover and assess", "focus": ["scanner", "aws_apis", "evidence", "completeness"], "note": "Follow read-only AWS discovery into per-operation coverage and immutable evidence." },
+      { "id": "finalize-and-deliver", "label": "Finalize and deliver", "focus": ["finalizer", "report", "delivery", "run_store"], "note": "Trace size-bounded aggregation, durable outputs, notification, and terminal run state." },
+      { "id": "recovery-and-visibility", "label": "Recovery and visibility", "focus": ["starter", "run_store"], "note": "Distinguish duplicate delivery, failed-run redrive, partial results, and operations signals." }
+    ]
+  },
+  "lanes": [
+    { "id": "trigger", "label": "Run Intake + Orchestration" },
+    { "id": "discovery", "label": "AWS Discovery" },
+    { "id": "evidence", "label": "Evidence + Completeness" },
+    { "id": "delivery", "label": "Finalization + Reports" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "Accept and deduplicate", "fromCol": 0, "toCol": 1 },
+    { "id": "scan", "label": "Scan with bounded concurrency", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "publish", "label": "Finalize and report", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "run_control", "label": "Durable run control", "lane": "trigger", "fromCol": 0, "toCol": 2, "variant": "emphasis" },
+    { "id": "scan_evidence", "label": "Per-scanner evidence", "lane": "evidence", "fromCol": 2, "toCol": 4, "variant": "security" }
+  ],
+  "mainPath": ["schedule", "starter", "state_machine", "scanner", "aws_apis", "evidence", "finalizer", "completeness", "report", "run_store"],
+  "semanticChecks": {
+    "allowedRoots": ["schedule"],
+    "allowedTerminals": ["delivery", "run_store"],
+    "requiredEdges": [
+      { "from": "starter", "to": "state_machine" },
+      { "from": "scanner", "to": "aws_apis" },
+      { "from": "evidence", "to": "finalizer" },
+      { "from": "completeness", "to": "report" },
+      { "from": "report", "to": "run_store" }
+    ]
+  },
+  "nodes": [
+    { "id": "schedule", "lane": "trigger", "col": 0, "type": "messagebus", "label": "Run Trigger", "width": 112 },
+    { "id": "starter", "lane": "trigger", "col": 1, "type": "backend", "label": "Starter Lambda", "width": 140 },
+    { "id": "state_machine", "lane": "trigger", "col": 2, "type": "cloud", "label": "Step Functions", "width": 132 },
+    { "id": "scanner", "lane": "discovery", "col": 3, "type": "backend", "label": "Scanner Lambdas × 7", "width": 142 },
+    { "id": "aws_apis", "lane": "discovery", "col": 4, "type": "cloud", "label": "AWS Read APIs", "width": 150 },
+    { "id": "evidence", "lane": "evidence", "col": 4, "type": "database", "label": "S3 Scan Evidence", "width": 138 },
+    { "id": "completeness", "lane": "evidence", "col": 5, "type": "security", "label": "Coverage Check", "width": 130 },
+    { "id": "finalizer", "lane": "delivery", "col": 4, "type": "backend", "label": "Finalizer" },
+    { "id": "report", "lane": "delivery", "col": 5, "type": "database", "label": "S3 Report", "width": 132 },
+    { "id": "delivery", "lane": "discovery", "col": 5, "type": "messagebus", "label": "SNS Summary", "width": 125 },
+    { "id": "run_store", "lane": "trigger", "col": 5, "type": "database", "label": "DynamoDB State", "width": 140 }
+  ],
+  "edges": [
+    { "from": "schedule", "to": "starter", "label": "scheduled event", "variant": "emphasis", "role": "main" },
+    { "from": "starter", "to": "state_machine", "label": "dedupe + start named run", "variant": "emphasis", "role": "main" },
+    { "from": "state_machine", "to": "scanner", "label": "dispatch map", "variant": "emphasis", "role": "main" },
+    { "from": "scanner", "to": "aws_apis", "label": "read inventory + metrics", "variant": "emphasis", "role": "main" },
+    { "from": "aws_apis", "to": "evidence", "label": "findings + scan metadata", "role": "main" },
+    { "from": "evidence", "to": "finalizer", "label": "attempt references", "role": "main" },
+    { "from": "finalizer", "to": "completeness", "label": "assess operation coverage", "variant": "emphasis", "role": "main" },
+    { "from": "report", "to": "delivery", "label": "publish summary", "role": "async" },
+    { "from": "report", "to": "run_store", "label": "persist terminal outcome", "variant": "emphasis", "role": "main" },
+    { "from": "completeness", "to": "report", "label": "complete / partial / failed", "variant": "dashed", "role": "main" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Read-only cost discovery", "items": ["Scans EBS, EC2, load balancers, RDS, EIPs, and eligible snapshots; schedule is disabled by default", "Scanners recommend actions but never mutate AWS resources", "Pricing gaps stay explicit; unknown prices are not reported as savings"] },
+    { "dot": "emerald", "title": "Trustworthy run outcomes", "items": ["Step Functions Standard dispatches a Map with concurrency capped at four", "Partial coverage and unsupported metric evidence remain visible", "A duplicate failed event reports failure; deliberate retry uses a new redrive key"] },
+    { "dot": "amber", "title": "Bounded, retry-safe delivery", "items": ["Finalizer preflights artifact sizes against a 2 MiB aggregate budget; oversize input fails its scanner", "S3 outputs are deterministic and write-once with hash verification", "SNS is at-least-once; side-effect retries must tolerate duplicate delivery"] }
+  ]
+}
