@@ -1,17 +1,19 @@
 from contextvars import ContextVar
+
 PRICE_SOURCE = ContextVar("price_source", default="unknown")
-import math
-from decimal import Decimal, ROUND_HALF_UP
-from utils.schema import field as schema_field, resource_identity
-from utils.scan_context import check_deadline
 import json
-import os
 import logging
+import math
+import os
 import time
+from decimal import ROUND_HALF_UP, Decimal
 
 import boto3
 
 from utils.aws_helpers import BOTO3_CONFIG
+from utils.scan_context import check_deadline
+from utils.schema import field as schema_field
+from utils.schema import resource_identity
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +72,13 @@ _pricing_client = None
 # Small pricing snapshot. Values are approximate; override via PRICING_JSON/PRICING_FILE.
 # Live Pricing API is primary when PRICING_MODE=live; these are the cached fallback.
 DEFAULT_PRICING = {
-    "EBS": 0.10,        # $ per GB-month (gp3 approx)
-    "EC2": {
-        "t3.micro": 8.50,
-        "t3.small": 17.00,
-        "t3.medium": 34.00
-    },
-    "ELB": 18.00,       # $ per ALB-month (approx)
+    "EBS": 0.10,  # $ per GB-month (gp3 approx)
+    "EC2": {"t3.micro": 8.50, "t3.small": 17.00, "t3.medium": 34.00},
+    "ELB": 18.00,  # $ per ALB-month (approx)
     "NLB": 18.00,
     "ELB_CLASSIC": 18.00,
-    "RDS": 120.00,      # $ per stopped cluster (approx)
-    "RDS_INSTANCE": {   # $ per stopped/idle instance by class
+    "RDS": 120.00,  # $ per stopped cluster (approx)
+    "RDS_INSTANCE": {  # $ per stopped/idle instance by class
         "db.t3.micro": 13.00,
         "db.t3.small": 26.00,
         "db.t3.medium": 52.00,
@@ -88,8 +86,8 @@ DEFAULT_PRICING = {
         "db.t4g.small": 25.00,
         "db.r5.large": 200.00,
     },
-    "EIP": 3.60,        # $ per unattached Elastic IP-month (approx)
-    "SNAPSHOT": 0.05,   # $ per GB-month of EBS snapshot storage (approx)
+    "EIP": 3.60,  # $ per unattached Elastic IP-month (approx)
+    "SNAPSHOT": 0.05,  # $ per GB-month of EBS snapshot storage (approx)
 }
 
 _REQUIRED_PRICING_KEYS = ("EBS", "EC2", "ELB", "RDS", "RDS_INSTANCE", "EIP", "SNAPSHOT")
@@ -102,6 +100,7 @@ def _field(resource, name, default=None):
 def _load_pricing():
     """Load pricing config, deep-merging any user override over the defaults."""
     from utils.scan_context import CURRENT
+
     context = CURRENT.get()
     if context and context.config.pricing_json:
         return json.loads(context.config.pricing_json)
@@ -153,8 +152,18 @@ def _load_pricing():
             numeric = float(value)
             if not math.isfinite(numeric) or numeric < 0:
                 raise ValueError("Pricing values must be finite and nonnegative")
+
     validate(merged)
-    tables = {"EC2", "RDS_INSTANCE", "EBS_IOPS", "EBS_THROUGHPUT", "RDS_STORAGE", "RDS_IOPS", "EC2_CONFIGS", "RDS_CONFIGS"}
+    tables = {
+        "EC2",
+        "RDS_INSTANCE",
+        "EBS_IOPS",
+        "EBS_THROUGHPUT",
+        "RDS_STORAGE",
+        "RDS_IOPS",
+        "EC2_CONFIGS",
+        "RDS_CONFIGS",
+    }
     for key in tables & merged.keys():
         if not isinstance(merged[key], dict):
             raise ValueError(f"{key} must be a rate table")
@@ -168,7 +177,9 @@ def _get_pricing_client():
     """Lazy initialization of Pricing API client (always us-east-1)."""
     global _pricing_client
     if _pricing_client is None:
-        _pricing_client = boto3.session.Session().client("pricing", region_name="us-east-1", config=BOTO3_CONFIG)
+        _pricing_client = boto3.session.Session().client(
+            "pricing", region_name="us-east-1", config=BOTO3_CONFIG
+        )
     return _pricing_client
 
 
@@ -188,8 +199,10 @@ def _clean_cache():
 
     # Enforce size limit (remove oldest entries)
     if len(_PRICE_CACHE) > MAX_CACHE_SIZE:
-        sorted_items = sorted(_PRICE_CACHE.items(), key=lambda x: x[1].get("timestamp", 0))
-        for k, _ in sorted_items[:len(_PRICE_CACHE) - MAX_CACHE_SIZE]:
+        sorted_items = sorted(
+            _PRICE_CACHE.items(), key=lambda x: x[1].get("timestamp", 0)
+        )
+        for k, _ in sorted_items[: len(_PRICE_CACHE) - MAX_CACHE_SIZE]:
             del _PRICE_CACHE[k]
 
 
@@ -206,7 +219,6 @@ def _safe_price(fn, *args):
     except Exception as e:
         logger.warning(f"Pricing API call failed: {e}")
         return None
-
 
 
 def _cache_price(key, price, ttl=None, namespace=None):
@@ -227,13 +239,13 @@ def _get_static_fallback(resource_type, **kwargs):
     pricing = _load_pricing()
     if resource_type == "EC2":
         monthly = pricing["EC2"].get(kwargs.get("instance_type"))
-        return float(monthly)/HOURS_PER_MONTH if monthly is not None else None
+        return float(monthly) / HOURS_PER_MONTH if monthly is not None else None
     if resource_type == "EBS":
         raw = pricing["EBS"]
         value = raw.get(kwargs.get("volume_type")) if isinstance(raw, dict) else raw
         return float(value) if value is not None else None
     if resource_type in ("ELB", "NLB", "ELB_CLASSIC"):
-        return float(pricing.get(resource_type, pricing["ELB"]))/HOURS_PER_MONTH
+        return float(pricing.get(resource_type, pricing["ELB"])) / HOURS_PER_MONTH
     if resource_type == "RDS_INSTANCE":
         value = pricing["RDS_INSTANCE"].get(kwargs.get("instance_class"))
         return float(value) if value is not None else None
@@ -282,11 +294,13 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
         logger.warning(f"Unknown resource type for pricing: {resource_type}")
         return None
 
-    key = (key, tuple(sorted((k, str(v)) for k, v in kwargs.items())),
-           json.dumps(_load_pricing(), sort_keys=True))
+    key = (
+        key,
+        tuple(sorted((k, str(v)) for k, v in kwargs.items())),
+        json.dumps(_load_pricing(), sort_keys=True),
+    )
     if pricing_mode == "live" and not _failure_cached(key):
         check_deadline()
-        # Step 1: live cache.
         live_key = f"live:{key}"
         if live_key in _PRICE_CACHE:
             cached = _PRICE_CACHE[live_key]
@@ -294,23 +308,32 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
                 PRICE_SOURCE.set("live-catalog")
                 return cached.get("price")
 
-        # Step 2: live API for all supported types.
         live_price = None
         try:
             if resource_type == "EC2":
-                live_price = _safe_price(_get_ec2_hourly_price, kwargs.get("instance_type"), region)
+                live_price = _safe_price(
+                    _get_ec2_hourly_price, kwargs.get("instance_type"), region
+                )
             elif resource_type == "EBS":
-                live_price = _safe_price(_get_ebs_gb_month_price, kwargs.get("volume_type"), region)
+                live_price = _safe_price(
+                    _get_ebs_gb_month_price, kwargs.get("volume_type"), region
+                )
             elif resource_type == "ELB":
                 live_price = _safe_price(_get_alb_hourly_price, region)
             elif resource_type == "NLB":
                 live_price = _safe_price(_get_nlb_hourly_price, region)
             elif resource_type in ("ELB_CLASSIC", "GATEWAY"):
                 live_price = _safe_price(_get_classic_elb_hourly_price, region)
-            elif resource_type in ("RDS", "RDS_CLUSTER"):
-                live_price = _safe_price(_get_rds_monthly_price, kwargs.get("instance_class"), kwargs.get("engine"), region)
-            elif resource_type == "RDS_INSTANCE":
-                live_price = _safe_price(_get_rds_monthly_price, kwargs.get("instance_class"), kwargs.get("engine"), region)
+            elif (
+                resource_type in ("RDS", "RDS_CLUSTER")
+                or resource_type == "RDS_INSTANCE"
+            ):
+                live_price = _safe_price(
+                    _get_rds_monthly_price,
+                    kwargs.get("instance_class"),
+                    kwargs.get("engine"),
+                    region,
+                )
             elif resource_type == "EIP":
                 live_price = _safe_price(_get_eip_monthly_price, region)
             elif resource_type == "SNAPSHOT":
@@ -318,14 +341,18 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
         except Exception as e:
             logger.warning(f"Live pricing API error for {resource_type}: {e}")
 
-        if live_price is not None and (not math.isfinite(float(live_price)) or live_price < 0):
+        if live_price is not None and (
+            not math.isfinite(float(live_price)) or live_price < 0
+        ):
             live_price = None
         if live_price is not None:
             _cache_price(key, live_price, ttl=CACHE_TTL, namespace="live")
             PRICE_SOURCE.set("live-catalog")
             return live_price
         _FAILURE_CACHE[str(key)] = time.monotonic() + 30
-        logger.info(f"Live pricing unavailable for {resource_type}, falling back to static")
+        logger.info(
+            f"Live pricing unavailable for {resource_type}, falling back to static"
+        )
 
     # Static path (also used in static mode): static cache -> config.
     static_key = f"static:{key}"
@@ -336,7 +363,9 @@ def get_price(resource_type, region, pricing_mode=None, **kwargs):
             return cached.get("price")
 
     if resource_type == "GATEWAY":
-        logger.warning("Gateway LB has no dedicated price; using ALB rate as approximation")
+        logger.warning(
+            "Gateway LB has no dedicated price; using ALB rate as approximation"
+        )
         resource_type = "ELB"
 
     static_price = _get_static_fallback(resource_type, **kwargs)
@@ -365,9 +394,12 @@ def _get_location(region):
         return None
     location = PRICING_REGION_MAP.get(region)
     if location is None:
-        logger.warning(f"Region {region!r} not in PRICING_REGION_MAP; Pricing API lookup may fail, using raw value")
+        logger.warning(
+            f"Region {region!r} not in PRICING_REGION_MAP; Pricing API lookup may fail, using raw value"
+        )
         return region
     return location
+
 
 _USAGE_UNITS = ("Hrs", "GB-Mo", "GB-Month", "GB-Months")
 
@@ -416,7 +448,9 @@ def _query_products(service_code, filters, max_pages=3):
 
 def _get_ec2_hourly_price(instance_type, region):
     """Get EC2 hourly price from Pricing API (Linux/Shared baseline, logged)."""
-    logger.debug(f"EC2 live price uses Linux/Shared baseline for {instance_type}; non-Linux may be underestimated")
+    logger.debug(
+        f"EC2 live price uses Linux/Shared baseline for {instance_type}; non-Linux may be underestimated"
+    )
     location = _get_location(region)
     if not location or not instance_type:
         return None
@@ -432,7 +466,11 @@ def _get_ec2_hourly_price(instance_type, region):
                 {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
                 {"Type": "TERM_MATCH", "Field": "preInstalledSw", "Value": "NA"},
                 {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
-                {"Type": "TERM_MATCH", "Field": "licenseModel", "Value": "No License required"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "licenseModel",
+                    "Value": "No License required",
+                },
             ],
             MaxResults=1,
         )
@@ -458,7 +496,11 @@ def _get_ebs_gb_month_price(volume_type, region):
             [
                 {"Type": "TERM_MATCH", "Field": "location", "Value": location},
                 {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Storage"},
-                {"Type": "TERM_MATCH", "Field": "volumeApiName", "Value": volume_api_name},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "volumeApiName",
+                    "Value": volume_api_name,
+                },
             ],
         )
         price = _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
@@ -470,11 +512,21 @@ def _get_ebs_gb_month_price(volume_type, region):
                 "AmazonEC2",
                 [
                     {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                    {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Storage"},
-                    {"Type": "TERM_MATCH", "Field": "volumeType", "Value": volume_family},
+                    {
+                        "Type": "TERM_MATCH",
+                        "Field": "productFamily",
+                        "Value": "Storage",
+                    },
+                    {
+                        "Type": "TERM_MATCH",
+                        "Field": "volumeType",
+                        "Value": volume_family,
+                    },
                 ],
             )
-            price = _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
+            price = _extract_price_per_unit(
+                response, ("GB-Mo", "GB-Month", "GB-Months")
+            )
 
         return price
     except Exception as e:
@@ -493,9 +545,21 @@ def _get_alb_hourly_price(region):
             "AWSELB",
             [
                 {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Load Balancer"},
-                {"Type": "TERM_MATCH", "Field": "loadBalancerType", "Value": "Application"},
-                {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Application"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "productFamily",
+                    "Value": "Load Balancer",
+                },
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "loadBalancerType",
+                    "Value": "Application",
+                },
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "operation",
+                    "Value": "LoadBalancing:Application",
+                },
             ],
         )
         return _extract_price_per_unit(response, ("Hrs",))
@@ -515,9 +579,17 @@ def _get_nlb_hourly_price(region):
             "AWSELB",
             [
                 {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Load Balancer"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "productFamily",
+                    "Value": "Load Balancer",
+                },
                 {"Type": "TERM_MATCH", "Field": "loadBalancerType", "Value": "Network"},
-                {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Network"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "operation",
+                    "Value": "LoadBalancing:Network",
+                },
             ],
         )
         return _extract_price_per_unit(response, ("Hrs",))
@@ -537,9 +609,17 @@ def _get_classic_elb_hourly_price(region):
             "AWSELB",
             [
                 {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Load Balancer"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "productFamily",
+                    "Value": "Load Balancer",
+                },
                 {"Type": "TERM_MATCH", "Field": "loadBalancerType", "Value": "Classic"},
-                {"Type": "TERM_MATCH", "Field": "operation", "Value": "LoadBalancing:Classic"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "operation",
+                    "Value": "LoadBalancing:Classic",
+                },
             ],
         )
         return _extract_price_per_unit(response, ("Hrs",))
@@ -555,20 +635,32 @@ def _get_rds_monthly_price(instance_class, engine, region):
         return None
     if not instance_class or not engine:
         return None
-    filters = [{"Type": "TERM_MATCH", "Field": "location", "Value": location},
-               {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Database Instance"},
-               {"Type": "TERM_MATCH", "Field": "deploymentOption", "Value": "Single-AZ"}]
+    filters = [
+        {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+        {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Database Instance"},
+        {"Type": "TERM_MATCH", "Field": "deploymentOption", "Value": "Single-AZ"},
+    ]
     if instance_class:
-        filters.append({"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_class})
+        filters.append(
+            {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_class}
+        )
     else:
-        filters.append({"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Database Instance"})
+        filters.append(
+            {
+                "Type": "TERM_MATCH",
+                "Field": "productFamily",
+                "Value": "Database Instance",
+            }
+        )
     if engine:
         engine_map = {"mysql": "MySQL", "postgres": "PostgreSQL", "mariadb": "MariaDB"}
         mapped = engine_map.get(str(engine).lower())
         if not mapped:
             return None
         if mapped:
-            filters.append({"Type": "TERM_MATCH", "Field": "databaseEngine", "Value": mapped})
+            filters.append(
+                {"Type": "TERM_MATCH", "Field": "databaseEngine", "Value": mapped}
+            )
     try:
         response = _query_products("AmazonRDS", filters)
         price_hourly = _extract_price_per_unit(response, ("Hrs",))
@@ -613,7 +705,11 @@ def _get_snapshot_gb_month_price(region):
             "AmazonEC2",
             [
                 {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                {"Type": "TERM_MATCH", "Field": "productFamily", "Value": "Storage Snapshot"},
+                {
+                    "Type": "TERM_MATCH",
+                    "Field": "productFamily",
+                    "Value": "Storage Snapshot",
+                },
             ],
         )
         return _extract_price_per_unit(response, ("GB-Mo", "GB-Month", "GB-Months"))
@@ -626,11 +722,16 @@ def estimate_monthly_waste(resources):
     """Return priced findings plus a reconciled subtotal, preserving unpriced rows."""
     from cost_engine.pricing_provider import estimate
     from utils.scan_context import CURRENT
+
     context = CURRENT.get()
-    pricing_mode = context.config.pricing_mode if context else os.environ.get("PRICING_MODE", "static").lower()
+    pricing_mode = (
+        context.config.pricing_mode
+        if context
+        else os.environ.get("PRICING_MODE", "static").lower()
+    )
     if pricing_mode not in ("static", "live"):
         pricing_mode = "static"
-    rows, seen, total = [], set(), Decimal("0")
+    rows, seen, total = [], set(), Decimal(0)
     budget_exhausted = False
     pricing = _load_pricing()
     for resource in resources or []:
@@ -645,12 +746,29 @@ def estimate_monthly_waste(resources):
         except TimeoutError:
             budget_exhausted = True
         if budget_exhausted:
-            cost, provenance = None, {"source": "unknown", "complete": False, "components": [], "notes": ["Pricing deadline exhausted"]}
+            cost, provenance = (
+                None,
+                {
+                    "source": "unknown",
+                    "complete": False,
+                    "components": [],
+                    "notes": ["Pricing deadline exhausted"],
+                },
+            )
         else:
             cost, provenance = estimate(resource, pricing_mode, get_price, pricing)
-        money = Decimal(str(cost)).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) if cost is not None else None
+        money = (
+            Decimal(str(cost)).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+            if cost is not None
+            else None
+        )
         if money is not None:
             total += money
-        rows.append({**resource, "monthly_cost": float(money) if money is not None else None,
-                     "pricing": provenance})
+        rows.append(
+            {
+                **resource,
+                "monthly_cost": float(money) if money is not None else None,
+                "pricing": provenance,
+            }
+        )
     return rows, float(total)

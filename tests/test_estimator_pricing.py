@@ -6,7 +6,10 @@ from cost_engine.estimator import estimate_monthly_waste
 def test_pricing_json_override(monkeypatch):
     monkeypatch.delenv("PRICING_JSON", raising=False)
     monkeypatch.delenv("PRICING_FILE", raising=False)
-    monkeypatch.setenv("PRICING_JSON", json.dumps({"EBS": 1, "EC2": {"t3.micro": 99}, "ELB": 2, "RDS": 3}))
+    monkeypatch.setenv(
+        "PRICING_JSON",
+        json.dumps({"EBS": 1, "EC2": {"t3.micro": 99}, "ELB": 2, "RDS": 3}),
+    )
     resources = [{"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 2}]
 
     estimated, total = estimate_monthly_waste(resources)

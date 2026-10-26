@@ -5,7 +5,7 @@ aggregation, conservative snapshot/EBS/LB classification, explicit unknown costs
 archives, conditional stage leases, isolated Standard workflow tasks, scoped infrastructure,
 locked production dependencies and regression/SDK-contract tests.
 
-## Verified local evidence (2026-10-14)
+## Historical validation snapshot (2026-10-14)
 
 - Python 3.12.14 with the pinned runtime/development dependencies: 291 tests passed,
   one explicitly opt-in deployed staging test skipped. Combined statement/branch
@@ -20,6 +20,15 @@ locked production dependencies and regression/SDK-contract tests.
 The Windows import check does not validate Linux native wheels. Docker's daemon is
 unavailable locally, so the Linux SAM build remains pending along with live AWS checks.
 CI defines those build/import checks; its remote execution has not been verified here.
+
+## Current local verification (2026-10-27)
+
+- The current checkout passed 308 tests; one opt-in deployed staging test was skipped.
+- Ruff import/undefined-name checks and `git diff --check` passed after the latest
+  local edits. No current coverage, cfn-lint, pip-audit, artifact-validation, Linux
+  SAM build, remote CI, or AWS deployment result is claimed by this run.
+- Earlier counts and checks above are historical evidence from 2026-10-14, not a
+  substitute for current CI or staging evidence.
 
 ## Follow-up review items
 

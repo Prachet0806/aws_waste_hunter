@@ -1,5 +1,6 @@
 from compliance.tag_checker import check_tag_compliance
 
+
 def test_tag_compliance():
     resources = [
         {"type": "EC2", "id": "i-1", "tags": {"owner": "sre", "env": "prod"}},

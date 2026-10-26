@@ -1,6 +1,8 @@
 """Complete, timestamped CloudWatch aggregation across all response pages."""
+
 import math
 from datetime import datetime
+
 from utils.config import Config
 from utils.scan_context import CURRENT, check_deadline, record_error
 
@@ -11,8 +13,12 @@ def collect(cloudwatch, queries, start, end, period):
     try:
         while True:
             check_deadline()
-            params = {"MetricDataQueries": queries, "StartTime": start, "EndTime": end,
-                      "ScanBy": "TimestampAscending"}
+            params = {
+                "MetricDataQueries": queries,
+                "StartTime": start,
+                "EndTime": end,
+                "ScanBy": "TimestampAscending",
+            }
             if token:
                 params["NextToken"] = token
             response = cloudwatch.get_metric_data(**params)
@@ -24,9 +30,14 @@ def collect(cloudwatch, queries, start, end, period):
                     bad.add(key)
                 if result.get("StatusCode") not in ("Complete", "PartialData"):
                     bad.add(key)
-                if result.get("StatusCode") == "PartialData" and not response.get("NextToken"):
+                if result.get("StatusCode") == "PartialData" and not response.get(
+                    "NextToken"
+                ):
                     bad.add(key)
-                values, timestamps = result.get("Values", []), result.get("Timestamps", [])
+                values, timestamps = (
+                    result.get("Values", []),
+                    result.get("Timestamps", []),
+                )
                 if len(values) != len(timestamps):
                     bad.add(key)
                     continue
@@ -35,7 +46,11 @@ def collect(cloudwatch, queries, start, end, period):
                         bad.add(key)
                         continue
                     value = float(value)
-                    if not math.isfinite(value) or value < 0 or not start <= stamp < end:
+                    if (
+                        not math.isfinite(value)
+                        or value < 0
+                        or not start <= stamp < end
+                    ):
                         bad.add(key)
                         continue
                     if stamp in samples[key] and samples[key][stamp] != value:
@@ -52,18 +67,34 @@ def collect(cloudwatch, queries, start, end, period):
         bad.update(samples)
     context = CURRENT.get()
     config = context.config if context else Config.load()
-    expected = math.ceil((end-start).total_seconds()/period)
+    expected = math.ceil((end - start).total_seconds() / period)
     output = {}
     for key, points in samples.items():
-        buckets = {int((t-start).total_seconds()//period) for t in points}
-        coverage = min(1.0, len(buckets)/max(1, expected))
-        span = ((max(points)-min(points)).total_seconds()+period)/86400 if points else 0
-        valid = key not in bad and coverage >= config.min_coverage and span >= config.min_observation_days
-        output[key] = {"values": list(points.values()), "coverage": coverage,
-                       "valid": valid, "start": start.isoformat(), "end": end.isoformat()}
+        buckets = {int((t - start).total_seconds() // period) for t in points}
+        coverage = min(1.0, len(buckets) / max(1, expected))
+        span = (
+            ((max(points) - min(points)).total_seconds() + period) / 86400
+            if points
+            else 0
+        )
+        valid = (
+            key not in bad
+            and coverage >= config.min_coverage
+            and span >= config.min_observation_days
+        )
+        output[key] = {
+            "values": list(points.values()),
+            "coverage": coverage,
+            "valid": valid,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }
         if context and not valid:
-            context.operation("get_metric_data", "incomplete",
-                              f"{key}: coverage={coverage:.3f}, observation_days={span:.2f}")
+            context.operation(
+                "get_metric_data",
+                "incomplete",
+                f"{key}: coverage={coverage:.3f}, observation_days={span:.2f}",
+            )
     return output
 
 
@@ -83,17 +114,21 @@ def statistics(response, start, end):
                 return {"complete": False, "total": None}
             seen[stamp] = value
     config = CURRENT.get().config if CURRENT.get() else Config.load()
-    buckets = {int((t-start).total_seconds()//86400) for t in seen}
-    expected = math.ceil((end-start).total_seconds()/86400)
-    complete = len(buckets)/max(1, expected) >= config.min_coverage
+    buckets = {int((t - start).total_seconds() // 86400) for t in seen}
+    expected = math.ceil((end - start).total_seconds() / 86400)
+    complete = len(buckets) / max(1, expected) >= config.min_coverage
     context = CURRENT.get()
     if context and not complete:
-        context.operation("get_metric_statistics", "incomplete",
-                          f"daily coverage={len(buckets)/max(1, expected):.3f}")
+        context.operation(
+            "get_metric_statistics",
+            "incomplete",
+            f"daily coverage={len(buckets) / max(1, expected):.3f}",
+        )
     return {"total": sum(seen.values()) if seen else None, "complete": complete}
 
 
 def window_end(period):
     from datetime import timezone
+
     stamp = datetime.now(timezone.utc).timestamp()
-    return datetime.fromtimestamp(int(stamp//period)*period, timezone.utc)
+    return datetime.fromtimestamp(int(stamp // period) * period, timezone.utc)

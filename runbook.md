@@ -85,6 +85,23 @@ Stopped RDS compute is excluded; storage/IOPS require verified rates and quantit
 Snapshot capacity is not billed incremental storage and deleting a snapshot may preserve
 shared blocks. Verify costs against billing-backed data before financial commitments.
 
+## Retained data and cleanup
+
+The report bucket and run table use `Retain` deletion policies. Deleting or replacing the
+stack therefore does not delete either resource. The bucket is versioned: current report
+objects expire after the configured `RetentionDays` (365 by default), and noncurrent
+versions expire after 30 days. Lifecycle expiration is asynchronous and must not be treated
+as proof that every version or delete marker has disappeared.
+
+For a planned cleanup, the service owner should first confirm the AWS account, region,
+stack, bucket and table names; export any manifests and run records subject to audit or
+legal retention; obtain the data owner's retention approval; and inspect the bucket's
+current lifecycle rules and object versions. Review explicit run prefixes and version IDs
+before any manual deletion. Do not use recursive bucket deletion or remove the table as a
+shortcut. Confirm lifecycle completion and billing after the approved retention window,
+then remove the retained bucket/table only through an approved change process. The runtime
+has no S3 or DynamoDB deletion permissions; cleanup is a separate operator responsibility.
+
 ## Candidate review before human cleanup
 
 - EC2/RDS: confirm a full observation window, production dependencies, scheduled jobs,

@@ -1,4 +1,4 @@
-import scanner.ebs_scanner as ebs_scanner
+from scanner import ebs_scanner
 
 
 class FakeEC2Client:
@@ -27,18 +27,20 @@ class FakePaginator:
 
 def test_scan_unattached_ebs_basic(monkeypatch):
     """Test basic EBS scanning with standard AZ."""
-    volumes_data = [{
-        "Volumes": [
-            {
-                "VolumeId": "vol-123",
-                "Size": 100,
-                "VolumeType": "gp3",
-                "AvailabilityZone": "us-east-1a",
-                "Tags": [{"Key": "owner", "Value": "sre"}]
-            }
-        ]
-    }]
-    
+    volumes_data = [
+        {
+            "Volumes": [
+                {
+                    "VolumeId": "vol-123",
+                    "Size": 100,
+                    "VolumeType": "gp3",
+                    "AvailabilityZone": "us-east-1a",
+                    "Tags": [{"Key": "owner", "Value": "sre"}],
+                }
+            ]
+        }
+    ]
+
     fake_client = FakeEC2Client(volumes_data)
     monkeypatch.setattr(ebs_scanner, "_ec2_client", fake_client)
 
@@ -63,7 +65,7 @@ def test_scan_unattached_ebs_multiple_pages(monkeypatch):
                     "Size": 50,
                     "VolumeType": "gp2",
                     "AvailabilityZone": "us-west-2a",
-                    "Tags": []
+                    "Tags": [],
                 }
             ]
         },
@@ -74,12 +76,12 @@ def test_scan_unattached_ebs_multiple_pages(monkeypatch):
                     "Size": 100,
                     "VolumeType": "io1",
                     "AvailabilityZone": "eu-west-1b",
-                    "Tags": [{"Key": "env", "Value": "prod"}]
+                    "Tags": [{"Key": "env", "Value": "prod"}],
                 }
             ]
-        }
+        },
     ]
-    
+
     fake_client = FakeEC2Client(volumes_data)
     monkeypatch.setattr(ebs_scanner, "_ec2_client", fake_client)
 
@@ -94,18 +96,20 @@ def test_scan_unattached_ebs_multiple_pages(monkeypatch):
 
 def test_scan_unattached_ebs_local_zone(monkeypatch):
     """Test region extraction from Local Zone."""
-    volumes_data = [{
-        "Volumes": [
-            {
-                "VolumeId": "vol-local",
-                "Size": 10,
-                "VolumeType": "gp3",
-                "AvailabilityZone": "us-east-1-bos-1a",
-                "Tags": []
-            }
-        ]
-    }]
-    
+    volumes_data = [
+        {
+            "Volumes": [
+                {
+                    "VolumeId": "vol-local",
+                    "Size": 10,
+                    "VolumeType": "gp3",
+                    "AvailabilityZone": "us-east-1-bos-1a",
+                    "Tags": [],
+                }
+            ]
+        }
+    ]
+
     fake_client = FakeEC2Client(volumes_data)
     monkeypatch.setattr(ebs_scanner, "_ec2_client", fake_client)
 
@@ -118,18 +122,20 @@ def test_scan_unattached_ebs_local_zone(monkeypatch):
 
 def test_scan_unattached_ebs_no_tags(monkeypatch):
     """Test handling of volumes without tags."""
-    volumes_data = [{
-        "Volumes": [
-            {
-                "VolumeId": "vol-notags",
-                "Size": 25,
-                "VolumeType": "sc1",
-                "AvailabilityZone": "ap-south-1a"
-                # No Tags field
-            }
-        ]
-    }]
-    
+    volumes_data = [
+        {
+            "Volumes": [
+                {
+                    "VolumeId": "vol-notags",
+                    "Size": 25,
+                    "VolumeType": "sc1",
+                    "AvailabilityZone": "ap-south-1a",
+                    # No Tags field
+                }
+            ]
+        }
+    ]
+
     fake_client = FakeEC2Client(volumes_data)
     monkeypatch.setattr(ebs_scanner, "_ec2_client", fake_client)
 
@@ -142,7 +148,7 @@ def test_scan_unattached_ebs_no_tags(monkeypatch):
 def test_scan_unattached_ebs_empty_result(monkeypatch):
     """Test scanning when no unattached volumes exist."""
     volumes_data = [{"Volumes": []}]
-    
+
     fake_client = FakeEC2Client(volumes_data)
     monkeypatch.setattr(ebs_scanner, "_ec2_client", fake_client)
 

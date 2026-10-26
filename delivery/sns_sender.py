@@ -1,9 +1,9 @@
 # delivery/sns_sender.py
 import logging
+import math
 import os
 import re
 import uuid
-import math
 
 from utils.aws_factory import get_client
 from utils.scan_context import CURRENT
@@ -39,7 +39,11 @@ def _topic_region():
     m = re.match(r"^arn:aws[a-z-]*:sns:([a-z0-9-]+):", arn or "")
     if m:
         return m.group(1)
-    explicit = os.environ.get("SNS_TOPIC_REGION") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    explicit = (
+        os.environ.get("SNS_TOPIC_REGION")
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+    )
     return (explicit or "").strip() or None
 
 
@@ -142,19 +146,30 @@ def send_report(report, result=None):
     message = report
     encoded = message.encode("utf-8")
     attrs = _build_message_attributes(result) if result else {}
-    attr_bytes = sum(len(k.encode()) + len(v["DataType"].encode()) + len(v["StringValue"].encode()) for k, v in attrs.items())
+    attr_bytes = sum(
+        len(k.encode()) + len(v["DataType"].encode()) + len(v["StringValue"].encode())
+        for k, v in attrs.items()
+    )
     message_limit = SNS_MAX_BYTES - attr_bytes - 1024
     if len(encoded) > message_limit:
         s3_hint = os.environ.get("REPORT_BUCKET", "")
-        note = f"\n\n[TRUNCATED for SNS 256KB limit; full report in S3 bucket {s3_hint} ]"
+        note = (
+            f"\n\n[TRUNCATED for SNS 256KB limit; full report in S3 bucket {s3_hint} ]"
+        )
         budget = message_limit - len(note.encode("utf-8"))
-        truncated = encoded[:max(budget, 0)].decode("utf-8", errors="ignore")
+        truncated = encoded[: max(budget, 0)].decode("utf-8", errors="ignore")
         message = truncated + note
-        logger.warning(f"SNS message truncated from {len(encoded)} to {len(message.encode('utf-8'))} bytes")
+        logger.warning(
+            f"SNS message truncated from {len(encoded)} to {len(message.encode('utf-8'))} bytes"
+        )
 
     # Subject must be ASCII-safe-ish and <=100 chars; weekly->generic schedule.
     schedule = os.environ.get("REPORT_SCHEDULE", "Weekly")
-    subject = "".join(c for c in f"AWS Waste Hunter - {schedule} Cost Optimization Report" if 32 <= ord(c) < 127)[:99]
+    subject = "".join(
+        c
+        for c in f"AWS Waste Hunter - {schedule} Cost Optimization Report"
+        if 32 <= ord(c) < 127
+    )[:99]
 
     publish_params = {
         "TopicArn": topic_arn,
@@ -170,6 +185,8 @@ def send_report(report, result=None):
 
     response = sns.publish(**publish_params)
     message_id = response.get("MessageId", "") if isinstance(response, dict) else ""
-    logger.info(f"Report sent successfully via SNS (MessageId={message_id or 'unknown'})")
+    logger.info(
+        f"Report sent successfully via SNS (MessageId={message_id or 'unknown'})"
+    )
     _ = uuid
     return message_id

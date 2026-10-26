@@ -1,5 +1,6 @@
 from datetime import timedelta
-import scanner.elb_scanner as elb_scanner
+
+from scanner import elb_scanner
 
 
 class FakeElbV2Paginator:
@@ -65,50 +66,70 @@ class FakeCloudwatchClient:
         namespace = kwargs["Namespace"]
         metric_name = kwargs["MetricName"]
         dimension_value = kwargs["Dimensions"][0]["Value"]
-        
-        self.calls.append({
-            "namespace": namespace,
-            "metric": metric_name,
-            "dimension": dimension_value
-        })
-        
+
+        self.calls.append(
+            {
+                "namespace": namespace,
+                "metric": metric_name,
+                "dimension": dimension_value,
+            }
+        )
+
         key = f"{namespace}:{metric_name}:{dimension_value}"
         datapoints = self.metrics_map.get(key, [])
         if not datapoints and metric_name == "ProcessedBytes":
-            datapoints = self.metrics_map.get(f"{namespace}:RequestCount:{dimension_value}", [])
+            datapoints = self.metrics_map.get(
+                f"{namespace}:RequestCount:{dimension_value}", []
+            )
         if not datapoints and metric_name == "NewFlowCount":
-            datapoints = self.metrics_map.get(f"{namespace}:ProcessedBytes:{dimension_value}", [])
-        
+            datapoints = self.metrics_map.get(
+                f"{namespace}:ProcessedBytes:{dimension_value}", []
+            )
+
         if not datapoints:
             return {"Datapoints": []}
-        
-        return {"Datapoints": [{"Sum": datapoints[n % len(datapoints)], "Timestamp": kwargs["StartTime"]+timedelta(days=n)} for n in range(7)]}
+
+        return {
+            "Datapoints": [
+                {
+                    "Sum": datapoints[n % len(datapoints)],
+                    "Timestamp": kwargs["StartTime"] + timedelta(days=n),
+                }
+                for n in range(7)
+            ]
+        }
 
 
 def test_scan_unused_elb_alb_with_tags(monkeypatch):
     """Test ALB scanning with proper metric dimension and tags."""
-    lbs_data = [{
-        "LoadBalancers": [{
-            "LoadBalancerName": "my-alb",
-            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-alb/abc123",
-            "Type": "application",
-            "Scheme": "internet-facing",
-            "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-        }]
-    }]
-    
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "my-alb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-alb/abc123",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                }
+            ]
+        }
+    ]
+
     tags_map = {
         "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-alb/abc123": [
             {"Key": "owner", "Value": "sre"},
-            {"Key": "env", "Value": "prod"}
+            {"Key": "env", "Value": "prod"},
         ]
     }
-    
+
     fake_elbv2 = FakeElbV2Client(lbs_data, tags_map)
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
     # Explicit zero traffic = unused (fail-open: empty/missing datapoints now skip).
-    fake_cw = FakeCloudwatchClient({"AWS/ApplicationELB:RequestCount:app/my-alb/abc123": [0]})
-    
+    fake_cw = FakeCloudwatchClient(
+        {"AWS/ApplicationELB:RequestCount:app/my-alb/abc123": [0]}
+    )
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -125,20 +146,26 @@ def test_scan_unused_elb_alb_with_tags(monkeypatch):
 
 def test_scan_unused_elb_nlb(monkeypatch):
     """Test Network Load Balancer scanning."""
-    lbs_data = [{
-        "LoadBalancers": [{
-            "LoadBalancerName": "my-nlb",
-            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-west-2:123:loadbalancer/net/my-nlb/xyz789",
-            "Type": "network",
-            "Scheme": "internal",
-            "AvailabilityZones": [{"ZoneName": "us-west-2b"}],
-        }]
-    }]
-    
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "my-nlb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-west-2:123:loadbalancer/net/my-nlb/xyz789",
+                    "Type": "network",
+                    "Scheme": "internal",
+                    "AvailabilityZones": [{"ZoneName": "us-west-2b"}],
+                }
+            ]
+        }
+    ]
+
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
-    fake_cw = FakeCloudwatchClient({"AWS/NetworkELB:ProcessedBytes:net/my-nlb/xyz789": [0]})
-    
+    fake_cw = FakeCloudwatchClient(
+        {"AWS/NetworkELB:ProcessedBytes:net/my-nlb/xyz789": [0]}
+    )
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -155,18 +182,22 @@ def test_scan_unused_elb_nlb(monkeypatch):
 
 def test_scan_unused_elb_classic(monkeypatch):
     """Test Classic Load Balancer scanning with tag fetching."""
-    classic_lbs_data = [{
-        "LoadBalancerDescriptions": [{
-            "LoadBalancerName": "my-classic-lb",
-            "Scheme": "internet-facing",
-            "AvailabilityZones": ["eu-west-1a", "eu-west-1b"],
-        }]
-    }]
+    classic_lbs_data = [
+        {
+            "LoadBalancerDescriptions": [
+                {
+                    "LoadBalancerName": "my-classic-lb",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": ["eu-west-1a", "eu-west-1b"],
+                }
+            ]
+        }
+    ]
 
     tags_map = {
         "my-classic-lb": [
             {"Key": "owner", "Value": "sre"},
-            {"Key": "env", "Value": "prod"}
+            {"Key": "env", "Value": "prod"},
         ]
     }
 
@@ -191,34 +222,36 @@ def test_scan_unused_elb_classic(monkeypatch):
 
 def test_scan_unused_elb_filters_used(monkeypatch):
     """Test that LBs with traffic are filtered out."""
-    lbs_data = [{
-        "LoadBalancers": [
-            {
-                "LoadBalancerName": "unused-alb",
-                "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/unused/abc",
-                "Type": "application",
-                "Scheme": "internet-facing",
-                "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-            },
-            {
-                "LoadBalancerName": "used-alb",
-                "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/used/def",
-                "Type": "application",
-                "Scheme": "internet-facing",
-                "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-            }
-        ]
-    }]
-    
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "unused-alb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/unused/abc",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                },
+                {
+                    "LoadBalancerName": "used-alb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/used/def",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                },
+            ]
+        }
+    ]
+
     metrics_map = {
         "AWS/ApplicationELB:RequestCount:app/unused/abc": [0],  # No traffic
-        "AWS/ApplicationELB:RequestCount:app/used/def": [1000, 2000]  # Has traffic
+        "AWS/ApplicationELB:RequestCount:app/used/def": [1000, 2000],  # Has traffic
     }
-    
+
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
     fake_cw = FakeCloudwatchClient(metrics_map)
-    
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -231,21 +264,25 @@ def test_scan_unused_elb_filters_used(monkeypatch):
 
 def test_scan_unused_elb_batch_tags(monkeypatch):
     """Test batch tag fetching for multiple LBs."""
-    lbs_data = [{
-        "LoadBalancers": [
-            {"LoadBalancerName": f"alb-{i}",
-             "LoadBalancerArn": f"arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/alb-{i}/x{i}",
-             "Type": "application",
-             "Scheme": "internet-facing",
-             "AvailabilityZones": [{"ZoneName": "us-east-1a"}]}
-            for i in range(25)  # 25 LBs to test batching (should be 2 API calls)
-        ]
-    }]
-    
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": f"alb-{i}",
+                    "LoadBalancerArn": f"arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/alb-{i}/x{i}",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                }
+                for i in range(25)  # 25 LBs to test batching (should be 2 API calls)
+            ]
+        }
+    ]
+
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
     fake_cw = FakeCloudwatchClient({})
-    
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -260,20 +297,26 @@ def test_scan_unused_elb_batch_tags(monkeypatch):
 
 def test_scan_unused_elb_empty_azs(monkeypatch):
     """Test handling of empty availability zones list."""
-    lbs_data = [{
-        "LoadBalancers": [{
-            "LoadBalancerName": "no-az-lb",
-            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/no-az/abc",
-            "Type": "application",
-            "Scheme": "internet-facing",
-            "AvailabilityZones": [],  # Empty list
-        }]
-    }]
-    
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "no-az-lb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/no-az/abc",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [],  # Empty list
+                }
+            ]
+        }
+    ]
+
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
-    fake_cw = FakeCloudwatchClient({"AWS/ApplicationELB:RequestCount:app/no-az/abc": [0]})
-    
+    fake_cw = FakeCloudwatchClient(
+        {"AWS/ApplicationELB:RequestCount:app/no-az/abc": [0]}
+    )
+
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)
     monkeypatch.setattr(elb_scanner, "_cloudwatch_client", fake_cw)
@@ -290,16 +333,20 @@ def test_scan_unused_elb_skips_brand_new(monkeypatch):
     """Test that LBs created within the scan window are not flagged as unused."""
     from datetime import datetime, timezone
 
-    lbs_data = [{
-        "LoadBalancers": [{
-            "LoadBalancerName": "new-alb",
-            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/new-alb/abc",
-            "Type": "application",
-            "Scheme": "internet-facing",
-            "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-            "CreatedTime": datetime.now(timezone.utc),
-        }]
-    }]
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "new-alb",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/new-alb/abc",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                    "CreatedTime": datetime.now(timezone.utc),
+                }
+            ]
+        }
+    ]
 
     fake_elbv2 = FakeElbV2Client(lbs_data, {})
     fake_elb = FakeClassicElbClient([{"LoadBalancerDescriptions": []}])
@@ -316,17 +363,24 @@ def test_scan_unused_elb_skips_brand_new(monkeypatch):
 
 def test_scan_unused_elb_classic_batch_tags(monkeypatch):
     """Test batch tag fetching for Classic LBs by name."""
-    classic_lbs_data = [{
-        "LoadBalancerDescriptions": [
-            {"LoadBalancerName": f"classic-{i}", "Scheme": "internet-facing",
-             "AvailabilityZones": ["us-east-1a"]}
-            for i in range(25)  # 25 Classic LBs to test batching (2 API calls)
-        ]
-    }]
+    classic_lbs_data = [
+        {
+            "LoadBalancerDescriptions": [
+                {
+                    "LoadBalancerName": f"classic-{i}",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": ["us-east-1a"],
+                }
+                for i in range(25)  # 25 Classic LBs to test batching (2 API calls)
+            ]
+        }
+    ]
 
     fake_elbv2 = FakeElbV2Client([{"LoadBalancers": []}])
     fake_elb = FakeClassicElbClient(classic_lbs_data, {})
-    fake_cw = FakeCloudwatchClient({f"AWS/ELB:RequestCount:classic-{i}": [0] for i in range(25)})
+    fake_cw = FakeCloudwatchClient(
+        {f"AWS/ELB:RequestCount:classic-{i}": [0] for i in range(25)}
+    )
 
     monkeypatch.setattr(elb_scanner, "_elbv2_client", fake_elbv2)
     monkeypatch.setattr(elb_scanner, "_elb_client", fake_elb)

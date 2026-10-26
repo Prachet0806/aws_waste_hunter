@@ -1,7 +1,9 @@
-import pytest
-from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
-import scanner.snapshot_scanner as snapshot_scanner
+from types import SimpleNamespace
+
+import pytest
+
+from scanner import snapshot_scanner
 
 
 class FakeEC2Paginator:
@@ -42,19 +44,30 @@ def _snapshot(snap_id, age_days, volume_size=10, volume_id="vol-1", tags=None):
 
 def _ami(snapshot_ids):
     return {
-        "Images": [{
-            "BlockDeviceMappings": [
-                {"Ebs": {"SnapshotId": sid}} for sid in snapshot_ids
-            ]
-        }]
+        "Images": [
+            {
+                "BlockDeviceMappings": [
+                    {"Ebs": {"SnapshotId": sid}} for sid in snapshot_ids
+                ]
+            }
+        ]
     }
 
 
 def test_scan_orphaned_snapshots_basic(monkeypatch):
     """Test basic orphaned snapshot detection."""
-    pages = [{"Snapshots": [
-        _snapshot("snap-1", age_days=30, volume_size=100, tags=[{"Key": "owner", "Value": "sre"}]),
-    ]}]
+    pages = [
+        {
+            "Snapshots": [
+                _snapshot(
+                    "snap-1",
+                    age_days=30,
+                    volume_size=100,
+                    tags=[{"Key": "owner", "Value": "sre"}],
+                ),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(snapshots_pages=pages)
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)
@@ -75,10 +88,14 @@ def test_scan_orphaned_snapshots_basic(monkeypatch):
 def test_scan_orphaned_snapshots_skips_ami_referenced(monkeypatch):
     """Test snapshots referenced by AMIs are not orphaned."""
     images = [_ami(["snap-inuse"])]
-    pages = [{"Snapshots": [
-        _snapshot("snap-inuse", age_days=30),
-        _snapshot("snap-orphan", age_days=30),
-    ]}]
+    pages = [
+        {
+            "Snapshots": [
+                _snapshot("snap-inuse", age_days=30),
+                _snapshot("snap-orphan", age_days=30),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(images_pages=images, snapshots_pages=pages)
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)
@@ -91,10 +108,14 @@ def test_scan_orphaned_snapshots_skips_ami_referenced(monkeypatch):
 
 def test_scan_orphaned_snapshots_skips_recent(monkeypatch):
     """Test snapshots younger than min age are skipped."""
-    pages = [{"Snapshots": [
-        _snapshot("snap-new", age_days=1),
-        _snapshot("snap-old", age_days=30),
-    ]}]
+    pages = [
+        {
+            "Snapshots": [
+                _snapshot("snap-new", age_days=1),
+                _snapshot("snap-old", age_days=30),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(snapshots_pages=pages)
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)
@@ -107,10 +128,14 @@ def test_scan_orphaned_snapshots_skips_recent(monkeypatch):
 
 def test_scan_orphaned_snapshots_custom_min_age(monkeypatch):
     """Test custom minimum age from env var."""
-    pages = [{"Snapshots": [
-        _snapshot("snap-5d", age_days=5),
-        _snapshot("snap-15d", age_days=15),
-    ]}]
+    pages = [
+        {
+            "Snapshots": [
+                _snapshot("snap-5d", age_days=5),
+                _snapshot("snap-15d", age_days=15),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(snapshots_pages=pages)
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)
@@ -123,10 +148,14 @@ def test_scan_orphaned_snapshots_custom_min_age(monkeypatch):
 
 def test_scan_orphaned_snapshots_invalid_min_age(monkeypatch):
     """Test invalid MIN_SNAPSHOT_AGE_DAYS falls back to default."""
-    pages = [{"Snapshots": [
-        _snapshot("snap-5d", age_days=5),
-        _snapshot("snap-30d", age_days=30),
-    ]}]
+    pages = [
+        {
+            "Snapshots": [
+                _snapshot("snap-5d", age_days=5),
+                _snapshot("snap-30d", age_days=30),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(snapshots_pages=pages)
     monkeypatch.setattr(snapshot_scanner, "_ec2_client", fake)

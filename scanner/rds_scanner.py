@@ -1,9 +1,9 @@
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/rds_scanner.py
 import logging
 
 from utils.aws_factory import get_client
-from utils.aws_helpers import get_region_from_az, safe_get_first, normalize_tags
+from utils.aws_helpers import get_region_from_az, normalize_tags, safe_get_first
+from utils.scan_context import CURRENT, record_error
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -62,26 +62,36 @@ def scan_stopped_rds():
         logger.info(f"Found {len(clusters)} RDS clusters")
 
         stopped_clusters = [
-            c for c in clusters
-            if isinstance(c, dict) and c.get("Status") == "stopped" and c.get("DBClusterIdentifier")
+            c
+            for c in clusters
+            if isinstance(c, dict)
+            and c.get("Status") == "stopped"
+            and c.get("DBClusterIdentifier")
         ]
         stopped_cluster_ids = {c["DBClusterIdentifier"] for c in stopped_clusters}
 
         if stopped_clusters:
-            cluster_arns = [c.get("DBClusterArn") for c in stopped_clusters if c.get("DBClusterArn")]
+            cluster_arns = [
+                c.get("DBClusterArn") for c in stopped_clusters if c.get("DBClusterArn")
+            ]
             cluster_tag_map = _get_batch_tags(cluster_arns)
 
             for c in stopped_clusters:
                 az_list = c.get("AvailabilityZones", []) or []
                 first_az = safe_get_first(az_list, "") or ""
                 cid = c["DBClusterIdentifier"]
-                wasted.append(build_resource(
-                    "RDS_CLUSTER", cid, region=get_region_from_az(first_az), az=first_az,
-                    arn=c.get("DBClusterArn"),
-                    reason="stopped",
-                    tags=cluster_tag_map.get(c.get("DBClusterArn"), {}),
-                    engine=c.get("Engine", "") or "",
-                ))
+                wasted.append(
+                    build_resource(
+                        "RDS_CLUSTER",
+                        cid,
+                        region=get_region_from_az(first_az),
+                        az=first_az,
+                        arn=c.get("DBClusterArn"),
+                        reason="stopped",
+                        tags=cluster_tag_map.get(c.get("DBClusterArn"), {}),
+                        engine=c.get("Engine", "") or "",
+                    )
+                )
 
         # Scan RDS Instances
         instance_paginator = rds.get_paginator("describe_db_instances")
@@ -92,8 +102,11 @@ def scan_stopped_rds():
         logger.info(f"Found {len(instances)} RDS instances")
 
         stopped_instances = [
-            i for i in instances
-            if isinstance(i, dict) and i.get("DBInstanceStatus") == "stopped" and i.get("DBInstanceIdentifier")
+            i
+            for i in instances
+            if isinstance(i, dict)
+            and i.get("DBInstanceStatus") == "stopped"
+            and i.get("DBInstanceIdentifier")
         ]
 
         # Skip members of an already-reported stopped cluster.
@@ -108,22 +121,31 @@ def scan_stopped_rds():
             standalone.append(i)
 
         if standalone:
-            instance_arns = [i.get("DBInstanceArn") for i in standalone if i.get("DBInstanceArn")]
+            instance_arns = [
+                i.get("DBInstanceArn") for i in standalone if i.get("DBInstanceArn")
+            ]
             instance_tag_map = _get_batch_tags(instance_arns)
 
             for i in standalone:
                 az = i.get("AvailabilityZone", "") or ""
                 iid = i["DBInstanceIdentifier"]
-                wasted.append(build_resource(
-                    "RDS_INSTANCE", iid, region=get_region_from_az(az), az=az,
-                    arn=i.get("DBInstanceArn"),
-                    reason="stopped",
-                    tags=instance_tag_map.get(i.get("DBInstanceArn"), {}),
-                    engine=i.get("Engine", "") or "",
-                    instance_class=i.get("DBInstanceClass", "") or "",
-                    storage_gb=i.get("AllocatedStorage"), storage_type=i.get("StorageType"),
-                    iops=i.get("Iops"), multi_az=i.get("MultiAZ", False),
-                ))
+                wasted.append(
+                    build_resource(
+                        "RDS_INSTANCE",
+                        iid,
+                        region=get_region_from_az(az),
+                        az=az,
+                        arn=i.get("DBInstanceArn"),
+                        reason="stopped",
+                        tags=instance_tag_map.get(i.get("DBInstanceArn"), {}),
+                        engine=i.get("Engine", "") or "",
+                        instance_class=i.get("DBInstanceClass", "") or "",
+                        storage_gb=i.get("AllocatedStorage"),
+                        storage_type=i.get("StorageType"),
+                        iops=i.get("Iops"),
+                        multi_az=i.get("MultiAZ", False),
+                    )
+                )
 
         logger.info(f"Found {len(wasted)} stopped RDS resources")
     except Exception as e:

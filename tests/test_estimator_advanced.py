@@ -1,5 +1,7 @@
-import pytest
 import time
+
+import pytest
+
 from cost_engine import estimator
 
 
@@ -10,11 +12,21 @@ class TestDeduplication:
         """Test that duplicate resources are removed."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
-            {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},  # Duplicate
-            {"type": "EC2", "region": "us-east-1", "id": "i-1", "instance_type": "t3.micro"},
+            {
+                "type": "EBS",
+                "region": "us-east-1",
+                "id": "vol-1",
+                "size_gb": 10,
+            },  # Duplicate
+            {
+                "type": "EC2",
+                "region": "us-east-1",
+                "id": "i-1",
+                "instance_type": "t3.micro",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -29,11 +41,16 @@ class TestDeduplication:
         """Test that different resources are not deduplicated."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
             {"type": "EBS", "region": "us-east-1", "id": "vol-2", "size_gb": 20},
-            {"type": "EC2", "region": "us-east-1", "id": "i-1", "instance_type": "t3.micro"},
+            {
+                "type": "EC2",
+                "region": "us-east-1",
+                "id": "i-1",
+                "instance_type": "t3.micro",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -48,11 +65,11 @@ class TestNoMutation:
         """Test that input resources are not modified."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
         ]
-        
+
         original_resource = resources[0].copy()
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -69,7 +86,7 @@ class TestPricingModeValidation:
         """Test invalid pricing mode falls back to static."""
         monkeypatch.setenv("PRICING_MODE", "invalid_mode")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
         ]
@@ -84,7 +101,7 @@ class TestPricingModeValidation:
         """Test explicit static pricing mode."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
         ]
@@ -104,22 +121,22 @@ class TestCacheTTL:
         monkeypatch.setenv("PRICING_MODE", "live")
         estimator._PRICE_CACHE.clear()
         estimator.CACHE_TTL = 1  # 1 second for testing
-        
+
         # Add a cache entry
         key = ("EC2", "t3.micro", "us-east-1")
         estimator._PRICE_CACHE[key] = {"price": 0.01, "timestamp": time.time()}
-        
+
         # Should be in cache
         assert key in estimator._PRICE_CACHE
         cached = estimator._PRICE_CACHE[key]
         assert time.time() - cached["timestamp"] < estimator.CACHE_TTL
-        
+
         # Wait for TTL to expire
         time.sleep(1.1)
-        
+
         # Trigger cache clean
         estimator._clean_cache()
-        
+
         # Should be removed
         assert key not in estimator._PRICE_CACHE
 
@@ -127,15 +144,15 @@ class TestCacheTTL:
         """Test that cache enforces size limit."""
         estimator._PRICE_CACHE.clear()
         estimator.MAX_CACHE_SIZE = 10
-        
+
         # Add more entries than the limit
         for i in range(15):
             key = ("TEST", f"instance-{i}", "region")
             estimator._PRICE_CACHE[key] = {"price": i, "timestamp": time.time()}
-        
+
         # Trigger cleanup
         estimator._clean_cache()
-        
+
         # Cache size should be at or below limit
         assert len(estimator._PRICE_CACHE) <= estimator.MAX_CACHE_SIZE
 
@@ -146,16 +163,16 @@ class TestFailedLookups:
     def test_failed_lookup_not_cached(self, monkeypatch):
         """Test that None results are not cached."""
         estimator._PRICE_CACHE.clear()
-        
+
         # Mock a function that returns None
         def mock_get_price(instance_type, region):
             return None
-        
+
         monkeypatch.setattr(estimator, "_get_ec2_hourly_price", mock_get_price)
-        
+
         # Try to get price (will return None)
         result = estimator._safe_price(mock_get_price, "t3.micro", "us-east-1")
-        
+
         assert result is None
         # Should not be in cache
         key = ("EC2", "t3.micro", "us-east-1")
@@ -169,7 +186,7 @@ class TestUnknownResourceTypes:
         """Test that unknown types are handled gracefully."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "UNKNOWN", "region": "us-east-1", "id": "res-1"},
             {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},
@@ -191,7 +208,7 @@ class TestRDSTypes:
         """Test RDS_CLUSTER type."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "RDS_CLUSTER", "region": "us-east-1", "id": "cluster-1"},
         ]
@@ -205,7 +222,7 @@ class TestRDSTypes:
         """Test RDS_INSTANCE type."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
             {"type": "RDS_INSTANCE", "region": "us-east-1", "id": "instance-1"},
         ]
@@ -223,11 +240,26 @@ class TestTotalCalculation:
         """Test that total is sum of individual costs."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = [
-            {"type": "EBS", "region": "us-east-1", "id": "vol-1", "size_gb": 10},  # $1.00
-            {"type": "EBS", "region": "us-east-1", "id": "vol-2", "size_gb": 50},  # $5.00
-            {"type": "EC2", "region": "us-east-1", "id": "i-1", "instance_type": "t3.micro"},  # $8.50
+            {
+                "type": "EBS",
+                "region": "us-east-1",
+                "id": "vol-1",
+                "size_gb": 10,
+            },  # $1.00
+            {
+                "type": "EBS",
+                "region": "us-east-1",
+                "id": "vol-2",
+                "size_gb": 50,
+            },  # $5.00
+            {
+                "type": "EC2",
+                "region": "us-east-1",
+                "id": "i-1",
+                "instance_type": "t3.micro",
+            },  # $8.50
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -239,7 +271,7 @@ class TestTotalCalculation:
         """Test with no resources."""
         monkeypatch.setenv("PRICING_MODE", "static")
         estimator._PRICE_CACHE.clear()
-        
+
         resources = []
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -259,27 +291,45 @@ class TestElbTypePricing:
         monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.99)
 
         resources = [
-            {"type": "ELB", "region": "us-east-1", "id": "nlb-1", "lb_type": "NETWORK", "region": "us-east-1"},
+            {
+                "type": "ELB",
+                "region": "us-east-1",
+                "id": "nlb-1",
+                "lb_type": "NETWORK",
+                "region": "us-east-1",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
 
-        assert estimated[0]["monthly_cost"] == round(0.02 * estimator.HOURS_PER_MONTH, 2)
+        assert estimated[0]["monthly_cost"] == round(
+            0.02 * estimator.HOURS_PER_MONTH, 2
+        )
 
     def test_classic_uses_classic_price(self, monkeypatch):
         """Test Classic ELB uses _get_classic_elb_hourly_price in live mode."""
         monkeypatch.setenv("PRICING_MODE", "live")
         estimator._PRICE_CACHE.clear()
-        monkeypatch.setattr(estimator, "_get_classic_elb_hourly_price", lambda region: 0.03)
+        monkeypatch.setattr(
+            estimator, "_get_classic_elb_hourly_price", lambda region: 0.03
+        )
         monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.99)
 
         resources = [
-            {"type": "ELB", "region": "us-east-1", "id": "classic-1", "lb_type": "CLASSIC", "region": "us-east-1"},
+            {
+                "type": "ELB",
+                "region": "us-east-1",
+                "id": "classic-1",
+                "lb_type": "CLASSIC",
+                "region": "us-east-1",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
 
-        assert estimated[0]["monthly_cost"] == round(0.03 * estimator.HOURS_PER_MONTH, 2)
+        assert estimated[0]["monthly_cost"] == round(
+            0.03 * estimator.HOURS_PER_MONTH, 2
+        )
 
     def test_alb_uses_alb_price(self, monkeypatch):
         """Test ALB uses _get_alb_hourly_price in live mode."""
@@ -289,12 +339,20 @@ class TestElbTypePricing:
         monkeypatch.setattr(estimator, "_get_alb_hourly_price", lambda region: 0.01)
 
         resources = [
-            {"type": "ELB", "region": "us-east-1", "id": "alb-1", "lb_type": "APPLICATION", "region": "us-east-1"},
+            {
+                "type": "ELB",
+                "region": "us-east-1",
+                "id": "alb-1",
+                "lb_type": "APPLICATION",
+                "region": "us-east-1",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
 
-        assert estimated[0]["monthly_cost"] == round(0.01 * estimator.HOURS_PER_MONTH, 2)
+        assert estimated[0]["monthly_cost"] == round(
+            0.01 * estimator.HOURS_PER_MONTH, 2
+        )
 
 
 class TestRdsInstancePricing:
@@ -306,12 +364,20 @@ class TestRdsInstancePricing:
         estimator._PRICE_CACHE.clear()
 
         resources = [
-            {"type": "RDS_INSTANCE", "region": "us-east-1", "id": "instance-1", "instance_class": "db.t3.small"},
+            {
+                "type": "RDS_INSTANCE",
+                "region": "us-east-1",
+                "id": "instance-1",
+                "instance_class": "db.t3.small",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
 
-        assert estimated[0]["monthly_cost"] == estimator.DEFAULT_PRICING["RDS_INSTANCE"]["db.t3.small"]
+        assert (
+            estimated[0]["monthly_cost"]
+            == estimator.DEFAULT_PRICING["RDS_INSTANCE"]["db.t3.small"]
+        )
 
     def test_rds_instance_unknown_class_falls_back(self, monkeypatch):
         """Test unknown instance class falls back to cluster default."""
@@ -319,7 +385,12 @@ class TestRdsInstancePricing:
         estimator._PRICE_CACHE.clear()
 
         resources = [
-            {"type": "RDS_INSTANCE", "region": "us-east-1", "id": "instance-1", "instance_class": "db.x1e.32xlarge"},
+            {
+                "type": "RDS_INSTANCE",
+                "region": "us-east-1",
+                "id": "instance-1",
+                "instance_class": "db.x1e.32xlarge",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -355,7 +426,12 @@ class TestLivePricingFilters:
         estimator._PRICE_CACHE.clear()
 
         resources = [
-            {"type": "EC2", "region": "us-east-1", "id": "i-1", "instance_type": "x2gd.metal"},
+            {
+                "type": "EC2",
+                "region": "us-east-1",
+                "id": "i-1",
+                "instance_type": "x2gd.metal",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -374,7 +450,12 @@ class TestPricingOverrideMerge:
         estimator._PRICE_CACHE.clear()
 
         resources = [
-            {"type": "EC2", "region": "us-east-1", "id": "i-1", "instance_type": "t3.micro"},
+            {
+                "type": "EC2",
+                "region": "us-east-1",
+                "id": "i-1",
+                "instance_type": "t3.micro",
+            },
         ]
 
         estimated, total = estimator.estimate_monthly_waste(resources)
@@ -385,7 +466,17 @@ class TestPricingOverrideMerge:
     def test_invalid_json_is_rejected(self, monkeypatch):
         monkeypatch.setenv("PRICING_JSON", "{not valid")
         with pytest.raises(ValueError, match="Invalid PRICING_JSON"):
-            estimator.estimate_monthly_waste([{"type": "EBS", "region": "us-east-1", "id": "v", "region": "us-east-1", "size_gb": 10}])
+            estimator.estimate_monthly_waste(
+                [
+                    {
+                        "type": "EBS",
+                        "region": "us-east-1",
+                        "id": "v",
+                        "region": "us-east-1",
+                        "size_gb": 10,
+                    }
+                ]
+            )
 
 
 class TestEipSnapshotPricing:

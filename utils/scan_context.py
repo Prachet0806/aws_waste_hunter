@@ -1,8 +1,9 @@
 """Per-invocation evidence and deadlines; no process-wide scan counters."""
+
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-import time
 
 CURRENT = ContextVar("scan_context", default=None)
 
@@ -27,13 +28,33 @@ class ScanContext:
 
     def error(self, stage, exc):
         code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
-        retryable = code in ("Throttling", "ThrottlingException", "RequestLimitExceeded", "SlowDown", "InternalError", "ServiceUnavailable") or type(exc).__name__ in ("EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError")
-        self.errors.append({"stage": stage, "type": type(exc).__name__, "error": str(exc)[:1000],
-                            "code": code, "retryable": retryable})
+        retryable = code in (
+            "Throttling",
+            "ThrottlingException",
+            "RequestLimitExceeded",
+            "SlowDown",
+            "InternalError",
+            "ServiceUnavailable",
+        ) or type(exc).__name__ in (
+            "EndpointConnectionError",
+            "ConnectTimeoutError",
+            "ReadTimeoutError",
+        )
+        self.errors.append(
+            {
+                "stage": stage,
+                "type": type(exc).__name__,
+                "error": str(exc)[:1000],
+                "code": code,
+                "retryable": retryable,
+            }
+        )
 
     def operation(self, name, status, reason=None):
         """Record each required SDK operation; failures remain sticky per scan."""
-        detail = self.operation_details.setdefault(name, {"required": True, "attempts": 0})
+        detail = self.operation_details.setdefault(
+            name, {"required": True, "attempts": 0}
+        )
         if status == "running":
             self.operations.setdefault(name, None)
             detail["attempts"] += 1
@@ -42,34 +63,68 @@ class ScanContext:
         previous = self.operations.get(name)
         complete = status == "complete" and previous is not False
         self.operations[name] = complete
-        detail["status"] = "complete" if complete else (status if status != "complete" else "incomplete")
+        detail["status"] = (
+            "complete"
+            if complete
+            else (status if status != "complete" else "incomplete")
+        )
         if reason:
             detail["reason"] = str(reason)[:500]
 
     def skip(self, resource_id, reason):
-        self.skips.append({"resource_id": resource_id, "reason": reason,
-                           "intentional": reason in ("protected resource", "protected or incomplete snapshot", "shared snapshot", "ASG-managed") or reason.startswith("unsupported lb_type")})
+        self.skips.append(
+            {
+                "resource_id": resource_id,
+                "reason": reason,
+                "intentional": reason
+                in (
+                    "protected resource",
+                    "protected or incomplete snapshot",
+                    "shared snapshot",
+                    "ASG-managed",
+                )
+                or reason.startswith("unsupported lb_type"),
+            }
+        )
 
     def add(self, resource):
         from utils.schema import resource_identity
+
         resource.setdefault("account_id", self.account_id)
         resource.setdefault("region", self.config.region)
         key = resource.get("resource_key") or resource_identity(resource)
-        if key not in self.inventory and len(self.inventory) >= self.config.max_resources:
+        if (
+            key not in self.inventory
+            and len(self.inventory) >= self.config.max_resources
+        ):
             raise RuntimeError("Inventory limit exceeded; coverage is incomplete")
         self.inventory[key] = resource
 
     def result(self, findings, elapsed):
-        complete = bool(self.operations) and not self.errors and all(self.operations.values())
-        return {"schema_version": 2, "scanner": self.scanner,
-                "account_id": self.account_id, "region": self.config.region,
-                "status": "complete" if complete and not any(not s["intentional"] for s in self.skips) else "partial",
-                "discovery_complete": complete, "findings": findings,
-                "inventory": list(self.inventory.values()), "scan_window": self.scan_window,
-                "discovered_count": len(self.inventory), "evaluated_count": max(0, len(self.inventory)-len(self.skips)),
-                "skipped_count": len(self.skips), "skip_reasons": self.skips,
-                "errors": self.errors, "operations": self.operations,
-                "operation_details": self.operation_details, "duration": elapsed}
+        complete = (
+            bool(self.operations) and not self.errors and all(self.operations.values())
+        )
+        return {
+            "schema_version": 2,
+            "scanner": self.scanner,
+            "account_id": self.account_id,
+            "region": self.config.region,
+            "status": "complete"
+            if complete and not any(not s["intentional"] for s in self.skips)
+            else "partial",
+            "discovery_complete": complete,
+            "findings": findings,
+            "inventory": list(self.inventory.values()),
+            "scan_window": self.scan_window,
+            "discovered_count": len(self.inventory),
+            "evaluated_count": max(0, len(self.inventory) - len(self.skips)),
+            "skipped_count": len(self.skips),
+            "skip_reasons": self.skips,
+            "errors": self.errors,
+            "operations": self.operations,
+            "operation_details": self.operation_details,
+            "duration": elapsed,
+        }
 
 
 @contextmanager
@@ -95,7 +150,9 @@ def record_error(stage, exc):
 
 def protected(tags):
     from utils.config import Config
+
     context = CURRENT.get()
     rules = context.config.excluded_tags if context else Config.load().excluded_tags
-    return any(str(tags.get(k, "")).lower() == v.lower() for k, v in rules.items()) or any(
-        k.startswith("aws:backup:") or k.startswith("aws:dlm:") for k in tags)
+    return any(
+        str(tags.get(k, "")).lower() == v.lower() for k, v in rules.items()
+    ) or any(k.startswith("aws:backup:") or k.startswith("aws:dlm:") for k in tags)

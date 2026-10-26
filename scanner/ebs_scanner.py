@@ -1,9 +1,9 @@
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/ebs_scanner.py
 import logging
 
-from utils.aws_factory import get_client, client_region
+from utils.aws_factory import client_region, get_client
 from utils.aws_helpers import get_region_from_az, log_and_skip, normalize_tags
+from utils.scan_context import CURRENT, protected
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -28,18 +28,19 @@ def _stopped_instance_volume_ids(ec2):
     try:
         paginator = ec2.get_paginator("describe_instances")
         try:
-            pages = paginator.paginate(
-
-            )
+            pages = paginator.paginate()
         except TypeError:
             pages = paginator.paginate()
         for page in pages:
-            for r in (page.get("Reservations", []) or []):
-                for inst in (r.get("Instances", []) or []):
-                    if inst.get("State", {}).get("Name", "stopped") not in ("stopped", "stopping"):
+            for r in page.get("Reservations", []) or []:
+                for inst in r.get("Instances", []) or []:
+                    if inst.get("State", {}).get("Name", "stopped") not in (
+                        "stopped",
+                        "stopping",
+                    ):
                         continue
                     stopped_ids.add(inst.get("InstanceId"))
-                    for mapping in (inst.get("BlockDeviceMappings", []) or []):
+                    for mapping in inst.get("BlockDeviceMappings", []) or []:
                         ebs = (mapping or {}).get("Ebs", {}) or {}
                         vid = ebs.get("VolumeId")
                         if vid:
@@ -66,7 +67,7 @@ def scan_unattached_ebs():
             pages = paginator.paginate()
 
         for page in pages:
-            for v in ((page or {}).get("Volumes", []) or []):
+            for v in (page or {}).get("Volumes", []) or []:
                 if not isinstance(v, dict) or not v.get("VolumeId"):
                     logger.warning("Skipping malformed volume record")
                     continue
@@ -78,8 +79,14 @@ def scan_unattached_ebs():
                     continue
                 state = raw_state.lower()
                 attachments = v.get("Attachments", []) or []
-                on_stopped = bool(attachments) and vid in stopped_vols and all(
-                    a.get("InstanceId") in getattr(ec2, "_stopped_ids", set()) for a in attachments)
+                on_stopped = (
+                    bool(attachments)
+                    and vid in stopped_vols
+                    and all(
+                        a.get("InstanceId") in getattr(ec2, "_stopped_ids", set())
+                        for a in attachments
+                    )
+                )
                 if state != "available" and not on_stopped:
                     continue
                 if protected(normalize_tags(v.get("Tags", []))):
@@ -89,20 +96,30 @@ def scan_unattached_ebs():
                 region = get_region_from_az(az)
                 if region is None and az:
                     logger.warning(f"Could not derive region from AZ {az!r} for {vid}")
-                reason = "unattached-available" if state == "available" else "attached-to-stopped-instance"
+                reason = (
+                    "unattached-available"
+                    if state == "available"
+                    else "attached-to-stopped-instance"
+                )
                 try:
                     size = int(v.get("Size", 0) or 0)
                 except (TypeError, ValueError):
                     size = 0
-                volumes.append(build_resource(
-                    "EBS", vid, region=region, az=az,
-                    reason=reason,
-                    tags=normalize_tags(v.get("Tags", []), source=f"ebs:{vid}"),
-                    size_gb=size,
-                    volume_type=v.get("VolumeType", ""),
-                    iops=v.get("Iops"), throughput=v.get("Throughput"),
-                    state=state or ("available" if not attachments else "in-use"),
-                ))
+                volumes.append(
+                    build_resource(
+                        "EBS",
+                        vid,
+                        region=region,
+                        az=az,
+                        reason=reason,
+                        tags=normalize_tags(v.get("Tags", []), source=f"ebs:{vid}"),
+                        size_gb=size,
+                        volume_type=v.get("VolumeType", ""),
+                        iops=v.get("Iops"),
+                        throughput=v.get("Throughput"),
+                        state=state or ("available" if not attachments else "in-use"),
+                    )
+                )
 
         logger.info(f"Found {len(volumes)} wasted EBS volumes")
     except Exception as e:

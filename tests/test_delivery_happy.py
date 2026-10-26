@@ -1,6 +1,6 @@
 """Happy-path delivery tests (previously only failure paths)."""
-import delivery.sns_sender as sns_sender
-import delivery.s3_archiver as s3_archiver
+
+from delivery import s3_archiver, sns_sender
 
 
 class FakeSNS:
@@ -25,10 +25,18 @@ def test_send_report_happy(monkeypatch):
     monkeypatch.setenv("SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:topic")
     fake = FakeSNS()
     monkeypatch.setattr(sns_sender, "_sns_client", fake)
-    mid = sns_sender.send_report("# report", {"monthly_waste": 10, "resources": 1,
-                                              "high_waste": False, "status": "ok",
-                                              "scan_errors": 0, "delivery_errors": 0,
-                                              "no_metrics": 0})
+    mid = sns_sender.send_report(
+        "# report",
+        {
+            "monthly_waste": 10,
+            "resources": 1,
+            "high_waste": False,
+            "status": "ok",
+            "scan_errors": 0,
+            "delivery_errors": 0,
+            "no_metrics": 0,
+        },
+    )
     assert mid == "mid-123"
     assert fake.calls[0]["TopicArn"].endswith(":topic")
     assert "MessageAttributes" in fake.calls[0]

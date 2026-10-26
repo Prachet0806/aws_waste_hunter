@@ -1,7 +1,6 @@
 # utils/aws_helpers.py
 import logging
 import re
-import threading
 
 from botocore.config import Config
 
@@ -24,7 +23,9 @@ def resolve_region(explicit=None):
     """Resolve AWS region with safe fallbacks (never return empty string)."""
     import os
 
-    region = explicit or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    region = (
+        explicit or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    )
     if not region:
         return None
     region = str(region).strip()
@@ -69,7 +70,9 @@ def get_region_from_az(az):
 
     region = "-".join(region_parts)
     if not _REGION_RE.match(region):
-        logger.debug(f"get_region_from_az: parsed invalid region {region!r} from {az!r}")
+        logger.debug(
+            f"get_region_from_az: parsed invalid region {region!r} from {az!r}"
+        )
         return None
     return region
 
@@ -142,8 +145,10 @@ def normalize_tags(raw_tags, source=""):
 
 class NoMetricsCounter:
     """Compatibility facade over context-local state; production uses ScanContext."""
+
     def record(self, resource_id, reason, exc=None):
         from utils.scan_context import CURRENT
+
         context = CURRENT.get()
         if context:
             context.skip(resource_id, reason)
@@ -153,13 +158,15 @@ class NoMetricsCounter:
 
     def count(self):
         from utils.scan_context import CURRENT
+
         context = CURRENT.get()
         return len(context.skips) if context else 0
 
     def ids(self):
         from utils.scan_context import CURRENT
+
         context = CURRENT.get()
-        return [s['resource_id'] for s in context.skips] if context else []
+        return [s["resource_id"] for s in context.skips] if context else []
 
     def reset(self):
         # A scanner must never reset another scanner's evidence.
@@ -171,7 +178,6 @@ GLOBAL_NO_METRICS = NoMetricsCounter()
 
 def log_and_skip(resource_id, reason, exc=None):
     GLOBAL_NO_METRICS.record(resource_id, reason, exc)
-    return None
 
 
 def reset_no_metrics():

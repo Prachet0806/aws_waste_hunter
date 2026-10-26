@@ -1,5 +1,6 @@
 from types import SimpleNamespace
-import scanner.eip_scanner as eip_scanner
+
+from scanner import eip_scanner
 
 
 class FakeEC2Paginator:
@@ -17,7 +18,9 @@ class FakeEC2Client:
         self.addresses_pages = addresses_pages
 
     def describe_addresses(self):
-        return {"Addresses": [a for page in self.addresses_pages for a in page["Addresses"]]}
+        return {
+            "Addresses": [a for page in self.addresses_pages for a in page["Addresses"]]
+        }
 
 
 def _eip(**kwargs):
@@ -28,11 +31,15 @@ def _eip(**kwargs):
 
 def test_scan_unattached_eips_basic(monkeypatch):
     """Test basic EIP scan finds unattached addresses."""
-    pages = [{
-        "Addresses": [
-            _eip(AllocationId="eipalloc-1", Tags=[{"Key": "owner", "Value": "sre"}]),
-        ]
-    }]
+    pages = [
+        {
+            "Addresses": [
+                _eip(
+                    AllocationId="eipalloc-1", Tags=[{"Key": "owner", "Value": "sre"}]
+                ),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(pages)
     monkeypatch.setattr(eip_scanner, "_ec2_client", fake)
@@ -49,14 +56,16 @@ def test_scan_unattached_eips_basic(monkeypatch):
 
 def test_scan_unattached_eips_skips_associated(monkeypatch):
     """Test that associated EIPs are skipped."""
-    pages = [{
-        "Addresses": [
-            _eip(AllocationId="eipalloc-assoc", AssociationId="eipassoc-1"),
-            _eip(AllocationId="eipalloc-inst", InstanceId="i-123"),
-            _eip(AllocationId="eipalloc-nic", NetworkInterfaceId="eni-123"),
-            _eip(AllocationId="eipalloc-free"),
-        ]
-    }]
+    pages = [
+        {
+            "Addresses": [
+                _eip(AllocationId="eipalloc-assoc", AssociationId="eipassoc-1"),
+                _eip(AllocationId="eipalloc-inst", InstanceId="i-123"),
+                _eip(AllocationId="eipalloc-nic", NetworkInterfaceId="eni-123"),
+                _eip(AllocationId="eipalloc-free"),
+            ]
+        }
+    ]
 
     fake = FakeEC2Client(pages)
     monkeypatch.setattr(eip_scanner, "_ec2_client", fake)
@@ -120,6 +129,7 @@ def test_scan_unattached_eips_multiple_addresses(monkeypatch):
 
 def test_scan_unattached_eips_error_propagates(monkeypatch):
     """Test that API errors propagate to caller."""
+
     class ExplodingClient:
         def __init__(self):
             self.meta = SimpleNamespace(region_name="us-east-1")

@@ -1,4 +1,5 @@
 """Allowlisted Lambda build. SAM invokes this inside its Linux build container."""
+
 import argparse
 import pathlib
 import shutil
@@ -6,7 +7,15 @@ import subprocess
 import sys
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1]
-PACKAGES = ("utils", "scanner", "cost_engine", "compliance", "reporting", "delivery", "orchestration")
+PACKAGES = (
+    "utils",
+    "scanner",
+    "cost_engine",
+    "compliance",
+    "reporting",
+    "delivery",
+    "orchestration",
+)
 
 
 def build(target, dependencies=True):
@@ -18,15 +27,29 @@ def build(target, dependencies=True):
         raise ValueError("Build target must be empty")
     if dependencies:
         if sys.platform != "linux" or sys.version_info[:2] != (3, 12):
-            raise RuntimeError("Dependency builds require the Python 3.12 Linux SAM container")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--only-binary=:all:",
-                        "-r", str(SOURCE/"requirements.lock"), "--target", str(target)], check=True)
-    shutil.copy2(SOURCE/"lambda_handler.py", target/"lambda_handler.py")
+            raise RuntimeError(
+                "Dependency builds require the Python 3.12 Linux SAM container"
+            )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--only-binary=:all:",
+                "-r",
+                str(SOURCE / "requirements.lock"),
+                "--target",
+                str(target),
+            ],
+            check=True,
+        )
+    shutil.copy2(SOURCE / "lambda_handler.py", target / "lambda_handler.py")
     for name in PACKAGES:
-        for source in (SOURCE/name).rglob("*.py"):
+        for source in (SOURCE / name).rglob("*.py"):
             if source.is_symlink() or "__pycache__" in source.parts:
                 continue
-            destination = target/source.relative_to(SOURCE)
+            destination = target / source.relative_to(SOURCE)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
     forbidden = {".env", ".git", ".aws", "tests", "htmlcov", "pytest", "pytest_cov"}

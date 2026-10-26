@@ -1,14 +1,15 @@
 """Regression tests for P0-P4 fixes (fail-open, live/static cache, schema)."""
+
 import json
 
 import pytest
 
-from utils.aws_helpers import chunk_list, normalize_tags, get_region_from_az
-import scanner.elb_scanner as elb_scanner
-import cost_engine.estimator as estimator
-from reporting.report_builder import build_report
-import compliance.tag_checker as tag_checker
 import lambda_handler
+from compliance import tag_checker
+from cost_engine import estimator
+from reporting.report_builder import build_report
+from scanner import elb_scanner
+from utils.aws_helpers import chunk_list, get_region_from_az, normalize_tags
 
 
 def test_chunk_list_validates_size():
@@ -36,19 +37,26 @@ def test_region_malformed_returns_none():
 
 def test_elb_fail_open_on_missing_datapoints(monkeypatch):
     """Missing CloudWatch datapoints must skip (fail-open), not flag unused."""
-    lbs_data = [{"LoadBalancers": [{
-        "LoadBalancerName": "lb-skip",
-        "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/app/lb-skip/x",
-        "Type": "application",
-        "Scheme": "internet-facing",
-        "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-    }]}]
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "lb-skip",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/app/lb-skip/x",
+                    "Type": "application",
+                    "Scheme": "internet-facing",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                }
+            ]
+        }
+    ]
 
     class FakeV2:
         def get_paginator(self, name):
             class P:
                 def paginate(self):
                     return lbs_data
+
             return P()
 
         def describe_tags(self, ResourceArns=None):
@@ -59,6 +67,7 @@ def test_elb_fail_open_on_missing_datapoints(monkeypatch):
             class P:
                 def paginate(self):
                     return [{"LoadBalancerDescriptions": []}]
+
             return P()
 
     class FakeCW:
@@ -72,19 +81,26 @@ def test_elb_fail_open_on_missing_datapoints(monkeypatch):
 
 
 def test_elb_gateway_skipped(monkeypatch):
-    lbs_data = [{"LoadBalancers": [{
-        "LoadBalancerName": "gw",
-        "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/gwy/gw/y",
-        "Type": "gateway",
-        "Scheme": "internal",
-        "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
-    }]}]
+    lbs_data = [
+        {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerName": "gw",
+                    "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/gwy/gw/y",
+                    "Type": "gateway",
+                    "Scheme": "internal",
+                    "AvailabilityZones": [{"ZoneName": "us-east-1a"}],
+                }
+            ]
+        }
+    ]
 
     class FakeV2:
         def get_paginator(self, name):
             class P:
                 def paginate(self):
                     return lbs_data
+
             return P()
 
         def describe_tags(self, ResourceArns=None):
@@ -95,6 +111,7 @@ def test_elb_gateway_skipped(monkeypatch):
             class P:
                 def paginate(self):
                     return [{"LoadBalancerDescriptions": []}]
+
             return P()
 
     class ExplodingCW:
@@ -114,7 +131,11 @@ def test_live_failure_falls_back_to_static_without_poisoning(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("pricing down")
 
-    monkeypatch.setattr(estimator, "_get_pricing_client", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(
+        estimator,
+        "_get_pricing_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("down")),
+    )
     # Force all live fetchers to fail via client error.
     price = estimator.get_price("EBS", "us-east-1", "live", volume_type="gp3")
     assert price == pytest.approx(0.10)
@@ -132,8 +153,17 @@ def test_gateway_priced_at_alb_rate(monkeypatch):
 
 
 def test_report_does_not_mutate_and_handles_zero_days():
-    resources = [{"type": "EBS", "id": "vol-1", "monthly_cost": 5.0, "days_idle": 0,
-                  "az": "us-east-1a", "region": "us-east-1", "tags": {}}]
+    resources = [
+        {
+            "type": "EBS",
+            "id": "vol-1",
+            "monthly_cost": 5.0,
+            "days_idle": 0,
+            "az": "us-east-1a",
+            "region": "us-east-1",
+            "tags": {},
+        }
+    ]
     snapshot = json.loads(json.dumps(resources))
     out = build_report(resources, 5.0, [], [], [], {})
     assert resources == snapshot  # no age_tier mutation
@@ -141,8 +171,17 @@ def test_report_does_not_mutate_and_handles_zero_days():
 
 
 def test_report_truncates_large_tables():
-    big = [{"type": "EBS", "id": f"vol-{i}", "monthly_cost": 1.0,
-            "az": "us-east-1a", "region": "us-east-1", "tags": {}} for i in range(600)]
+    big = [
+        {
+            "type": "EBS",
+            "id": f"vol-{i}",
+            "monthly_cost": 1.0,
+            "az": "us-east-1a",
+            "region": "us-east-1",
+            "tags": {},
+        }
+        for i in range(600)
+    ]
     out = build_report(big, 600.0, [], [], [], {})
     assert "vol-599" in out
     assert "more rows in full S3 archive" not in out
@@ -150,22 +189,36 @@ def test_report_truncates_large_tables():
 
 def test_tag_checker_empty_env_falls_back(monkeypatch):
     monkeypatch.setenv("REQUIRED_TAGS", "")
-    violations = tag_checker.check_tag_compliance([{"type": "EBS", "id": "v", "tags": {}}])
+    violations = tag_checker.check_tag_compliance(
+        [{"type": "EBS", "id": "v", "tags": {}}]
+    )
     assert len(violations) == 1
     # None tags and list-format tags never crash.
     assert tag_checker.check_tag_compliance([{"type": "EBS", "id": "v", "tags": None}])
-    assert tag_checker.check_tag_compliance(
-        [{"type": "EBS", "id": "v", "tags": [{"Key": "owner", "Value": "x"}]}]) is not None
+    assert (
+        tag_checker.check_tag_compliance(
+            [{"type": "EBS", "id": "v", "tags": [{"Key": "owner", "Value": "x"}]}]
+        )
+        is not None
+    )
 
 
 def test_waste_threshold_rejects_inf(monkeypatch):
     monkeypatch.setenv("WASTE_ALERT_THRESHOLD", "inf")
-    assert lambda_handler._get_waste_alert_threshold() == lambda_handler.DEFAULT_WASTE_ALERT_THRESHOLD
+    assert (
+        lambda_handler._get_waste_alert_threshold()
+        == lambda_handler.DEFAULT_WASTE_ALERT_THRESHOLD
+    )
     monkeypatch.setenv("WASTE_ALERT_THRESHOLD", "-5")
-    assert lambda_handler._get_waste_alert_threshold() == lambda_handler.DEFAULT_WASTE_ALERT_THRESHOLD
+    assert (
+        lambda_handler._get_waste_alert_threshold()
+        == lambda_handler.DEFAULT_WASTE_ALERT_THRESHOLD
+    )
 
 
 def test_overall_status_failed_only_on_total_failure():
     assert lambda_handler._overall_status([], [], []) == "ok"
-    assert lambda_handler._overall_status([{"stage": "x"}], [], [{"id": 1}]) == "partial"
+    assert (
+        lambda_handler._overall_status([{"stage": "x"}], [], [{"id": 1}]) == "partial"
+    )
     assert lambda_handler._overall_status([], [{"stage": "d"}], []) == "partial"

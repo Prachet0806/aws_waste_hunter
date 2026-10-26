@@ -1,6 +1,8 @@
-import pytest
 from datetime import timedelta
-import scanner.ec2_scanner as ec2_scanner
+
+import pytest
+
+from scanner import ec2_scanner
 
 
 class FakeEC2Paginator:
@@ -46,14 +48,19 @@ class FakeCloudwatchClient:
                 if metric == "cpu":
                     values = [values[n % len(values)] for n in range(28)]
                 else:
-                    values = [sum(values)/28]*28
-            results.append({
-                "Id": q["Id"],
-                "Label": iid,
-                "Timestamps": [kwargs["StartTime"]+timedelta(hours=6*n) for n in range(len(values))],
-                "Values": values,
-                "StatusCode": "Complete",
-            })
+                    values = [sum(values) / 28] * 28
+            results.append(
+                {
+                    "Id": q["Id"],
+                    "Label": iid,
+                    "Timestamps": [
+                        kwargs["StartTime"] + timedelta(hours=6 * n)
+                        for n in range(len(values))
+                    ],
+                    "Values": values,
+                    "StatusCode": "Complete",
+                }
+            )
         return {"MetricDataResults": results}
 
 
@@ -69,10 +76,22 @@ def _instance(iid, itype="t3.micro", az="us-east-1a", tags=None):
 
 def test_scan_idle_ec2_basic(monkeypatch):
     """Test basic EC2 scanning with idle instances."""
-    reservations_data = [{"Reservations": [{"Instances": [_instance("i-1", tags=[{"Key": "owner", "Value": "sre"}])]}]}]
+    reservations_data = [
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        _instance("i-1", tags=[{"Key": "owner", "Value": "sre"}])
+                    ]
+                }
+            ]
+        }
+    ]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [1.0, 1.5], "net_in": [0], "net_out": [0]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [1.0, 1.5], "net_in": [0], "net_out": [0]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -98,10 +117,12 @@ def test_scan_idle_ec2_pagination(monkeypatch):
     ]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({
-        "i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
-        "i-2": {"cpu": [1.5], "net_in": [0], "net_out": [0]},
-    })
+    fake_cw = FakeCloudwatchClient(
+        {
+            "i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
+            "i-2": {"cpu": [1.5], "net_in": [0], "net_out": [0]},
+        }
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -118,13 +139,26 @@ def test_scan_idle_ec2_pagination(monkeypatch):
 
 def test_scan_idle_ec2_filters_busy_instances(monkeypatch):
     """Test that busy instances are filtered out."""
-    reservations_data = [{"Reservations": [{"Instances": [_instance("i-idle"), _instance("i-busy", itype="t3.large")]}]}]
+    reservations_data = [
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        _instance("i-idle"),
+                        _instance("i-busy", itype="t3.large"),
+                    ]
+                }
+            ]
+        }
+    ]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({
-        "i-idle": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
-        "i-busy": {"cpu": [95.0], "net_in": [1000], "net_out": [1000]},
-    })
+    fake_cw = FakeCloudwatchClient(
+        {
+            "i-idle": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
+            "i-busy": {"cpu": [95.0], "net_in": [1000], "net_out": [1000]},
+        }
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -143,9 +177,11 @@ def test_scan_idle_ec2_filters_network_active(monkeypatch):
     reservations_data = [{"Reservations": [{"Instances": [_instance("i-proxy")]}]}]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({
-        "i-proxy": {"cpu": [0.5], "net_in": [500000000], "net_out": [500000000]},
-    })
+    fake_cw = FakeCloudwatchClient(
+        {
+            "i-proxy": {"cpu": [0.5], "net_in": [500000000], "net_out": [500000000]},
+        }
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -162,13 +198,26 @@ def test_scan_idle_ec2_filters_network_active(monkeypatch):
 def test_scan_idle_ec2_skips_asg_managed(monkeypatch):
     """Test that ASG-managed instances are skipped (B2)."""
     asg_tags = [{"Key": "aws:autoscaling:groupName", "Value": "web-asg"}]
-    reservations_data = [{"Reservations": [{"Instances": [_instance("i-asg", tags=asg_tags), _instance("i-standalone")]}]}]
+    reservations_data = [
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        _instance("i-asg", tags=asg_tags),
+                        _instance("i-standalone"),
+                    ]
+                }
+            ]
+        }
+    ]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({
-        "i-asg": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
-        "i-standalone": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
-    })
+    fake_cw = FakeCloudwatchClient(
+        {
+            "i-asg": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
+            "i-standalone": {"cpu": [1.0], "net_in": [0], "net_out": [0]},
+        }
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -193,7 +242,9 @@ def test_scan_idle_ec2_metric_batching(monkeypatch):
     instances = [_instance(f"i-{i}") for i in range(n)]
     reservations_data = [{"Reservations": [{"Instances": instances}]}]
 
-    metrics_map = {f"i-{i}": {"cpu": [1.0], "net_in": [0], "net_out": [0]} for i in range(n)}
+    metrics_map = {
+        f"i-{i}": {"cpu": [1.0], "net_in": [0], "net_out": [0]} for i in range(n)
+    }
     fake_ec2 = FakeEC2Client(reservations_data)
     fake_cw = FakeCloudwatchClient(metrics_map)
 
@@ -235,7 +286,9 @@ def test_get_no_metrics_count_reset(monkeypatch):
     reservations_data = [{"Reservations": [{"Instances": [_instance("i-1")]}]}]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -254,7 +307,9 @@ def test_scan_idle_ec2_custom_threshold(monkeypatch):
     reservations_data = [{"Reservations": [{"Instances": [_instance("i-1")]}]}]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [3.0], "net_in": [0], "net_out": [0]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [3.0], "net_in": [0], "net_out": [0]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -272,7 +327,9 @@ def test_scan_idle_ec2_invalid_threshold(monkeypatch):
     reservations_data = [{"Reservations": [{"Instances": [_instance("i-1")]}]}]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -290,7 +347,9 @@ def test_scan_idle_ec2_custom_network_threshold(monkeypatch):
 
     fake_ec2 = FakeEC2Client(reservations_data)
     # 800 bytes total, threshold set to 1000 -> idle; default would allow 1MB anyway
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [1.0], "net_in": [400], "net_out": [400]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [1.0], "net_in": [400], "net_out": [400]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)
@@ -307,10 +366,14 @@ def test_scan_idle_ec2_custom_network_threshold(monkeypatch):
 
 def test_scan_idle_ec2_local_zone(monkeypatch):
     """Test region extraction from Local Zone."""
-    reservations_data = [{"Reservations": [{"Instances": [_instance("i-1", az="us-east-1-bos-1a")]}]}]
+    reservations_data = [
+        {"Reservations": [{"Instances": [_instance("i-1", az="us-east-1-bos-1a")]}]}
+    ]
 
     fake_ec2 = FakeEC2Client(reservations_data)
-    fake_cw = FakeCloudwatchClient({"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}})
+    fake_cw = FakeCloudwatchClient(
+        {"i-1": {"cpu": [1.0], "net_in": [0], "net_out": [0]}}
+    )
 
     monkeypatch.setattr(ec2_scanner, "_ec2_client", fake_ec2)
     monkeypatch.setattr(ec2_scanner, "_cloudwatch_client", fake_cw)

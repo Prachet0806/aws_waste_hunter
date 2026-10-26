@@ -1,7 +1,8 @@
-from utils.schema import resource_identity
 # compliance/tag_checker.py
 import logging
 import os
+
+from utils.schema import resource_identity
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +71,15 @@ def check_tag_compliance(resources):
         missing = [t for t in required_tags if not str(tags.get(t) or "").strip()]
 
         if missing:
-            violations.append({
-                "resource_id": r.get("id"),
-                "resource_key": resource_identity(r),
-                "type": r.get("type"),
-                "missing_tags": missing,
-                "tags": dict(tags),
-            })
+            violations.append(
+                {
+                    "resource_id": r.get("id"),
+                    "resource_key": resource_identity(r),
+                    "type": r.get("type"),
+                    "missing_tags": missing,
+                    "tags": dict(tags),
+                }
+            )
 
     logger.info(f"Found {len(violations)} tag compliance violations")
     return violations
@@ -95,7 +98,11 @@ def compute_compliance_stats(resources, violations=None):
 
     total = len(resources)
     assessed = sum(r.get("tags_status") != "unknown" for r in resources)
-    violation_ids = {v.get("resource_key") or (v.get("type"), v.get("resource_id")) for v in violations if isinstance(v, dict)}
+    violation_ids = {
+        v.get("resource_key") or (v.get("type"), v.get("resource_id"))
+        for v in violations
+        if isinstance(v, dict)
+    }
     violation_ids.discard(None)
     compliant = assessed - len(violation_ids)
     if compliant < 0:
@@ -114,7 +121,9 @@ def compute_compliance_stats(resources, violations=None):
             missing_counts[tag] = missing_counts.get(tag, 0) + 1
 
     stats = {
-        "total": total, "assessed": assessed, "unassessed": total-assessed,
+        "total": total,
+        "assessed": assessed,
+        "unassessed": total - assessed,
         "compliant": compliant,
         "violations": len(violations),
         "percent": percent,

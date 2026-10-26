@@ -1,19 +1,19 @@
-from contextvars import ContextVar
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/ec2_scanner.py
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from contextvars import ContextVar
+from datetime import timedelta
 
 from utils.aws_factory import get_client
 from utils.aws_helpers import (
     GLOBAL_NO_METRICS,
-    get_region_from_az,
     chunk_list,
+    get_region_from_az,
     log_and_skip,
     normalize_tags,
     reset_no_metrics,
 )
+from utils.scan_context import CURRENT, protected
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,11 @@ def _get_network_threshold():
         try:
             raw = os.getenv("NETWORK_THRESHOLD", "1000000")
             NETWORK_THRESHOLD = float(raw)
-            if NETWORK_THRESHOLD < 0 or NETWORK_THRESHOLD == float("inf") or NETWORK_THRESHOLD != NETWORK_THRESHOLD:
+            if (
+                NETWORK_THRESHOLD < 0
+                or NETWORK_THRESHOLD == float("inf")
+                or NETWORK_THRESHOLD != NETWORK_THRESHOLD
+            ):
                 logger.warning(f"Invalid NETWORK_THRESHOLD {raw}, using default")
                 NETWORK_THRESHOLD = 1000000.0
         except (ValueError, TypeError):
@@ -75,7 +79,11 @@ def _get_cpu_threshold():
         try:
             raw = os.getenv("CPU_THRESHOLD", "2")
             CPU_THRESHOLD = float(raw)
-            if CPU_THRESHOLD < 0 or CPU_THRESHOLD > 100 or CPU_THRESHOLD != CPU_THRESHOLD:
+            if (
+                CPU_THRESHOLD < 0
+                or CPU_THRESHOLD > 100
+                or CPU_THRESHOLD != CPU_THRESHOLD
+            ):
                 logger.warning(f"Invalid CPU_THRESHOLD {raw}, using default 2")
                 CPU_THRESHOLD = 2.0
         except (ValueError, TypeError):
@@ -109,45 +117,51 @@ def _build_metric_queries(instance_ids):
     queries = []
     for idx, iid in enumerate(instance_ids):
         base_dimension = {"Name": "InstanceId", "Value": iid}
-        queries.append({
-            "Id": f"cpu_{idx}",
-            "MetricStat": {
-                "Metric": {
-                    "Namespace": "AWS/EC2",
-                    "MetricName": "CPUUtilization",
-                    "Dimensions": [base_dimension],
+        queries.append(
+            {
+                "Id": f"cpu_{idx}",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/EC2",
+                        "MetricName": "CPUUtilization",
+                        "Dimensions": [base_dimension],
+                    },
+                    "Period": METRIC_PERIOD,
+                    "Stat": "Average",
                 },
-                "Period": METRIC_PERIOD,
-                "Stat": "Average",
-            },
-            "ReturnData": True,
-        })
-        queries.append({
-            "Id": f"netin_{idx}",
-            "MetricStat": {
-                "Metric": {
-                    "Namespace": "AWS/EC2",
-                    "MetricName": "NetworkIn",
-                    "Dimensions": [base_dimension],
+                "ReturnData": True,
+            }
+        )
+        queries.append(
+            {
+                "Id": f"netin_{idx}",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/EC2",
+                        "MetricName": "NetworkIn",
+                        "Dimensions": [base_dimension],
+                    },
+                    "Period": METRIC_PERIOD,
+                    "Stat": "Sum",
                 },
-                "Period": METRIC_PERIOD,
-                "Stat": "Sum",
-            },
-            "ReturnData": True,
-        })
-        queries.append({
-            "Id": f"netout_{idx}",
-            "MetricStat": {
-                "Metric": {
-                    "Namespace": "AWS/EC2",
-                    "MetricName": "NetworkOut",
-                    "Dimensions": [base_dimension],
+                "ReturnData": True,
+            }
+        )
+        queries.append(
+            {
+                "Id": f"netout_{idx}",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/EC2",
+                        "MetricName": "NetworkOut",
+                        "Dimensions": [base_dimension],
+                    },
+                    "Period": METRIC_PERIOD,
+                    "Stat": "Sum",
                 },
-                "Period": METRIC_PERIOD,
-                "Stat": "Sum",
-            },
-            "ReturnData": True,
-        })
+                "ReturnData": True,
+            }
+        )
     return queries
 
 
@@ -164,16 +178,23 @@ def _parse_metric_id(metric_id):
 
 def _fetch_instance_metrics(cloudwatch, instance_ids, start, end):
     from utils.metrics import collect
+
     results = {}
     for chunk in chunk_list(instance_ids, MAX_METRIC_QUERIES // 3):
-        data = collect(cloudwatch, _build_metric_queries(chunk), start, end, METRIC_PERIOD)
+        data = collect(
+            cloudwatch, _build_metric_queries(chunk), start, end, METRIC_PERIOD
+        )
         for idx, iid in enumerate(chunk):
-            cpu, netin, netout = [data[f"{prefix}_{idx}"] for prefix in ("cpu", "netin", "netout")]
+            cpu, netin, netout = [
+                data[f"{prefix}_{idx}"] for prefix in ("cpu", "netin", "netout")
+            ]
             valid = all(m["valid"] for m in (cpu, netin, netout))
-            results[iid] = {"cpu": sum(cpu["values"])/len(cpu["values"]) if valid else None,
-                            "net_in": sum(netin["values"]) if valid else None,
-                            "net_out": sum(netout["values"]) if valid else None,
-                            "coverage": min(m["coverage"] for m in (cpu, netin, netout))}
+            results[iid] = {
+                "cpu": sum(cpu["values"]) / len(cpu["values"]) if valid else None,
+                "net_in": sum(netin["values"]) if valid else None,
+                "net_out": sum(netout["values"]) if valid else None,
+                "coverage": min(m["coverage"] for m in (cpu, netin, netout)),
+            }
     return results
 
 
@@ -198,6 +219,7 @@ def scan_idle_ec2():
     asg_skipped = []
 
     from utils.metrics import window_end
+
     now = window_end(METRIC_PERIOD)
     start = now - timedelta(days=7)
 
@@ -210,13 +232,11 @@ def scan_idle_ec2():
         paginator = ec2.get_paginator("describe_instances")
         running = []
         try:
-            pages = paginator.paginate(
-
-            )
+            pages = paginator.paginate()
         except TypeError:
             pages = paginator.paginate()
         for page in pages:
-            for r in (page.get("Reservations", []) or []):
+            for r in page.get("Reservations", []) or []:
                 running.extend(r.get("Instances", []) or [])
         logger.info(f"Found {len(running)} running instances")
 
@@ -238,7 +258,11 @@ def scan_idle_ec2():
                 candidates.append(i)
 
         instance_ids = [i["InstanceId"] for i in candidates]
-        metrics_map = _fetch_instance_metrics(cloudwatch, instance_ids, start, now) if instance_ids else {}
+        metrics_map = (
+            _fetch_instance_metrics(cloudwatch, instance_ids, start, now)
+            if instance_ids
+            else {}
+        )
 
         for i in candidates:
             iid = i["InstanceId"]
@@ -255,18 +279,26 @@ def scan_idle_ec2():
                 region = get_region_from_az(az)
                 if region is None and az:
                     logger.warning(f"Could not derive region from AZ {az!r} for {iid}")
-                idle.append(build_resource(
-                    "EC2", iid, region=region, az=az,
-                    reason="idle-low-cpu-network",
-                    tags=normalize_tags(i.get("Tags", []), source=f"ec2:{iid}"),
-                    platform=i.get("PlatformDetails", "Linux/UNIX"), tenancy=i.get("Placement", {}).get("Tenancy", "default"),
-                    purchasing="spot" if i.get("InstanceLifecycle") == "spot" else "on-demand",
-                    metric_coverage=m.get("coverage"),
-                    avg_cpu=round(m["cpu"], 2),
-                    net_in_bytes=round(m.get("net_in") or 0.0, 2),
-                    net_out_bytes=round(m.get("net_out") or 0.0, 2),
-                    instance_type=i.get("InstanceType", ""),
-                ))
+                idle.append(
+                    build_resource(
+                        "EC2",
+                        iid,
+                        region=region,
+                        az=az,
+                        reason="idle-low-cpu-network",
+                        tags=normalize_tags(i.get("Tags", []), source=f"ec2:{iid}"),
+                        platform=i.get("PlatformDetails", "Linux/UNIX"),
+                        tenancy=i.get("Placement", {}).get("Tenancy", "default"),
+                        purchasing="spot"
+                        if i.get("InstanceLifecycle") == "spot"
+                        else "on-demand",
+                        metric_coverage=m.get("coverage"),
+                        avg_cpu=round(m["cpu"], 2),
+                        net_in_bytes=round(m.get("net_in") or 0.0, 2),
+                        net_out_bytes=round(m.get("net_out") or 0.0, 2),
+                        instance_type=i.get("InstanceType", ""),
+                    )
+                )
 
         logger.info(
             f"Found {len(idle)} idle EC2 instances, {len(no_metrics)} with no metrics, "

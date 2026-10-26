@@ -1,5 +1,4 @@
-import pytest
-from utils.aws_helpers import get_region_from_az, safe_get_first, chunk_list
+from utils.aws_helpers import chunk_list, get_region_from_az, safe_get_first
 
 
 class TestGetRegionFromAz:
@@ -87,7 +86,7 @@ class TestChunkList:
         """Test chunking with evenly divisible size."""
         items = list(range(10))
         chunks = list(chunk_list(items, 5))
-        
+
         assert len(chunks) == 2
         assert chunks[0] == [0, 1, 2, 3, 4]
         assert chunks[1] == [5, 6, 7, 8, 9]
@@ -96,7 +95,7 @@ class TestChunkList:
         """Test chunking with remainder."""
         items = list(range(10))
         chunks = list(chunk_list(items, 3))
-        
+
         assert len(chunks) == 4
         assert chunks[0] == [0, 1, 2]
         assert chunks[1] == [3, 4, 5]
@@ -107,7 +106,7 @@ class TestChunkList:
         """Test when chunk size is larger than list."""
         items = [1, 2, 3]
         chunks = list(chunk_list(items, 10))
-        
+
         assert len(chunks) == 1
         assert chunks[0] == [1, 2, 3]
 
@@ -120,7 +119,7 @@ class TestChunkList:
         """Test chunking with size 1."""
         items = [1, 2, 3]
         chunks = list(chunk_list(items, 1))
-        
+
         assert len(chunks) == 3
         assert chunks[0] == [1]
         assert chunks[1] == [2]
@@ -130,7 +129,7 @@ class TestChunkList:
         """Test batching 25 items into chunks of 20 (AWS limit)."""
         items = list(range(25))
         chunks = list(chunk_list(items, 20))
-        
+
         assert len(chunks) == 2
         assert len(chunks[0]) == 20
         assert len(chunks[1]) == 5

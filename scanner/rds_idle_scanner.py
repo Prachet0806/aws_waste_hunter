@@ -1,17 +1,16 @@
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/rds_idle_scanner.py
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from utils.aws_factory import get_client
 from utils.aws_helpers import (
-    get_region_from_az,
-    safe_get_first,
     chunk_list,
+    get_region_from_az,
     log_and_skip,
     normalize_tags,
 )
+from utils.scan_context import CURRENT, protected, record_error
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -57,7 +56,9 @@ def _get_cpu_threshold():
         raw = os.getenv("RDS_CPU_THRESHOLD", str(CPU_THRESHOLD))
         value = float(raw)
         if value < 0 or value > 100 or value != value:
-            logger.warning(f"Invalid RDS_CPU_THRESHOLD {raw}, using default {CPU_THRESHOLD}")
+            logger.warning(
+                f"Invalid RDS_CPU_THRESHOLD {raw}, using default {CPU_THRESHOLD}"
+            )
             return CPU_THRESHOLD
         return value
     except (ValueError, TypeError):
@@ -93,35 +94,50 @@ def _build_metric_queries(resource_ids, namespace, metric_names, kind):
     for idx, rid in enumerate(resource_ids):
         base_dimension = _dimension_for_kind(kind, rid)
         for metric_name in metric_names:
-            queries.append({
-                "Id": f"{metric_name.lower().replace(' ', '')}_{idx}",
-                "MetricStat": {
-                    "Metric": {
-                        "Namespace": namespace,
-                        "MetricName": metric_name,
-                        "Dimensions": [base_dimension],
+            queries.append(
+                {
+                    "Id": f"{metric_name.lower().replace(' ', '')}_{idx}",
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": namespace,
+                            "MetricName": metric_name,
+                            "Dimensions": [base_dimension],
+                        },
+                        "Period": METRIC_PERIOD,
+                        "Stat": "Average"
+                        if metric_name == "CPUUtilization"
+                        else "Maximum",
                     },
-                    "Period": METRIC_PERIOD,
-                    "Stat": "Average" if metric_name == "CPUUtilization" else "Maximum",
-                },
-                "ReturnData": True,
-            })
+                    "ReturnData": True,
+                }
+            )
     return queries
 
 
-def _fetch_rds_metrics(cloudwatch, resource_ids, metric_names, start, end, kind="instance"):
+def _fetch_rds_metrics(
+    cloudwatch, resource_ids, metric_names, start, end, kind="instance"
+):
     from utils.metrics import collect
+
     results = {}
     if not metric_names:
         return {rid: {"cpu": None, "connections": None} for rid in resource_ids}
     for chunk in chunk_list(resource_ids, MAX_METRIC_QUERIES // len(metric_names)):
-        data = collect(cloudwatch, _build_metric_queries(chunk, "AWS/RDS", metric_names, kind), start, end, METRIC_PERIOD)
+        data = collect(
+            cloudwatch,
+            _build_metric_queries(chunk, "AWS/RDS", metric_names, kind),
+            start,
+            end,
+            METRIC_PERIOD,
+        )
         for idx, rid in enumerate(chunk):
             cpu = data.get(f"cpuutilization_{idx}", {"valid": False})
             conns = data.get(f"databaseconnections_{idx}", {"valid": False})
             valid = cpu["valid"] and conns["valid"]
-            results[rid] = {"cpu": sum(cpu["values"])/len(cpu["values"]) if valid else None,
-                            "connections": max(conns["values"]) if valid else None}
+            results[rid] = {
+                "cpu": sum(cpu["values"]) / len(cpu["values"]) if valid else None,
+                "connections": max(conns["values"]) if valid else None,
+            }
     return results
 
 
@@ -181,19 +197,26 @@ def scan_idle_rds():
         # 'available' plus maintenance-ish states still serving metrics; only
         # truly inactive states are excluded. Anything not stopped/failed counts.
         running_instances = [
-            i for i in instances
-            if isinstance(i, dict) and i.get("DBInstanceIdentifier")
+            i
+            for i in instances
+            if isinstance(i, dict)
+            and i.get("DBInstanceIdentifier")
             and i.get("DBInstanceStatus") in ("available", "backing-up", "modifying")
         ]
         instance_ids = [i["DBInstanceIdentifier"] for i in running_instances]
 
         if instance_ids:
             from utils.metrics import window_end
+
             now = window_end(METRIC_PERIOD)
             start = now - timedelta(days=7)
 
             metrics_map = _fetch_rds_metrics(
-                cloudwatch, instance_ids, ["CPUUtilization", "DatabaseConnections"], start, now,
+                cloudwatch,
+                instance_ids,
+                ["CPUUtilization", "DatabaseConnections"],
+                start,
+                now,
                 kind="instance",
             )
 
@@ -208,27 +231,41 @@ def scan_idle_rds():
                 if protected(normalize_tags(i.get("TagList", []))):
                     log_and_skip(iid, "protected resource")
                     continue
-                if m["cpu"] < cpu_threshold and (m.get("connections", 0) or 0) <= conn_threshold:
+                if (
+                    m["cpu"] < cpu_threshold
+                    and (m.get("connections", 0) or 0) <= conn_threshold
+                ):
                     idle_candidates.append((i, m))
 
-            tag_map = _get_batch_tags([i.get("DBInstanceArn") for i, _ in idle_candidates])
+            tag_map = _get_batch_tags(
+                [i.get("DBInstanceArn") for i, _ in idle_candidates]
+            )
             for i, m in idle_candidates:
                 iid = i["DBInstanceIdentifier"]
                 az = i.get("AvailabilityZone", "") or ""
                 max_conns = m.get("connections", 0)
-                idle.append(build_resource(
-                    "RDS_INSTANCE", iid, region=get_region_from_az(az), az=az,
-                    arn=i.get("DBInstanceArn"),
-                    reason="idle-low-cpu-connections",
-                    tags=normalize_tags(tag_map.get(i.get("DBInstanceArn"), {}), source=f"rds:{iid}"),
-                    engine=i.get("Engine", ""),
-                    instance_class=i.get("DBInstanceClass", ""),
-                    parent_id=i.get("DBClusterIdentifier"), multi_az=i.get("MultiAZ", False),
-                    storage_gb=i.get("AllocatedStorage"), storage_type=i.get("StorageType"),
-                    avg_cpu=round(m["cpu"], 2),
-                    max_connections=max_conns,
-                    avg_connections=max_conns,
-                ))
+                idle.append(
+                    build_resource(
+                        "RDS_INSTANCE",
+                        iid,
+                        region=get_region_from_az(az),
+                        az=az,
+                        arn=i.get("DBInstanceArn"),
+                        reason="idle-low-cpu-connections",
+                        tags=normalize_tags(
+                            tag_map.get(i.get("DBInstanceArn"), {}), source=f"rds:{iid}"
+                        ),
+                        engine=i.get("Engine", ""),
+                        instance_class=i.get("DBInstanceClass", ""),
+                        parent_id=i.get("DBClusterIdentifier"),
+                        multi_az=i.get("MultiAZ", False),
+                        storage_gb=i.get("AllocatedStorage"),
+                        storage_type=i.get("StorageType"),
+                        avg_cpu=round(m["cpu"], 2),
+                        max_connections=max_conns,
+                        avg_connections=max_conns,
+                    )
+                )
 
         # Cluster compute belongs to its members. Reporting aggregate CPU would
         # both obscure a busy member and duplicate member compute charges.

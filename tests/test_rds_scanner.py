@@ -1,4 +1,4 @@
-import scanner.rds_scanner as rds_scanner
+from scanner import rds_scanner
 
 
 class FakeRDSClusterPaginator:
@@ -39,25 +39,29 @@ class FakeRDSClient:
 
 def test_scan_stopped_rds_cluster_with_tags(monkeypatch):
     """Test scanning stopped RDS cluster with tags."""
-    clusters_data = [{
-        "DBClusters": [{
-            "DBClusterIdentifier": "my-cluster",
-            "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:my-cluster",
-            "Status": "stopped",
-            "Engine": "aurora-mysql",
-            "AvailabilityZones": ["us-east-1a", "us-east-1b"],
-        }]
-    }]
-    
+    clusters_data = [
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "my-cluster",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:my-cluster",
+                    "Status": "stopped",
+                    "Engine": "aurora-mysql",
+                    "AvailabilityZones": ["us-east-1a", "us-east-1b"],
+                }
+            ]
+        }
+    ]
+
     instances_data = [{"DBInstances": []}]
-    
+
     tags_map = {
         "arn:aws:rds:us-east-1:123:cluster:my-cluster": [
             {"Key": "owner", "Value": "sre"},
-            {"Key": "env", "Value": "staging"}
+            {"Key": "env", "Value": "staging"},
         ]
     }
-    
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, tags_map)
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -75,24 +79,28 @@ def test_scan_stopped_rds_cluster_with_tags(monkeypatch):
 def test_scan_stopped_rds_instance(monkeypatch):
     """Test scanning stopped RDS standalone instance."""
     clusters_data = [{"DBClusters": []}]
-    
-    instances_data = [{
-        "DBInstances": [{
-            "DBInstanceIdentifier": "my-db-instance",
-            "DBInstanceArn": "arn:aws:rds:eu-west-1:456:db:my-db-instance",
-            "DBInstanceStatus": "stopped",
-            "Engine": "postgres",
-            "DBInstanceClass": "db.t3.medium",
-            "AvailabilityZone": "eu-west-1c",
-        }]
-    }]
-    
+
+    instances_data = [
+        {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "my-db-instance",
+                    "DBInstanceArn": "arn:aws:rds:eu-west-1:456:db:my-db-instance",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "postgres",
+                    "DBInstanceClass": "db.t3.medium",
+                    "AvailabilityZone": "eu-west-1c",
+                }
+            ]
+        }
+    ]
+
     tags_map = {
         "arn:aws:rds:eu-west-1:456:db:my-db-instance": [
             {"Key": "team", "Value": "backend"}
         ]
     }
-    
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, tags_map)
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -109,27 +117,35 @@ def test_scan_stopped_rds_instance(monkeypatch):
 
 def test_scan_stopped_rds_both_cluster_and_instance(monkeypatch):
     """Test scanning both stopped clusters and instances."""
-    clusters_data = [{
-        "DBClusters": [{
-            "DBClusterIdentifier": "aurora-cluster",
-            "DBClusterArn": "arn:aws:rds:us-west-2:123:cluster:aurora-cluster",
-            "Status": "stopped",
-            "Engine": "aurora",
-            "AvailabilityZones": ["us-west-2a"],
-        }]
-    }]
-    
-    instances_data = [{
-        "DBInstances": [{
-            "DBInstanceIdentifier": "mysql-instance",
-            "DBInstanceArn": "arn:aws:rds:us-west-2:123:db:mysql-instance",
-            "DBInstanceStatus": "stopped",
-            "Engine": "mysql",
-            "DBInstanceClass": "db.t3.small",
-            "AvailabilityZone": "us-west-2b",
-        }]
-    }]
-    
+    clusters_data = [
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "aurora-cluster",
+                    "DBClusterArn": "arn:aws:rds:us-west-2:123:cluster:aurora-cluster",
+                    "Status": "stopped",
+                    "Engine": "aurora",
+                    "AvailabilityZones": ["us-west-2a"],
+                }
+            ]
+        }
+    ]
+
+    instances_data = [
+        {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "mysql-instance",
+                    "DBInstanceArn": "arn:aws:rds:us-west-2:123:db:mysql-instance",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "mysql",
+                    "DBInstanceClass": "db.t3.small",
+                    "AvailabilityZone": "us-west-2b",
+                }
+            ]
+        }
+    ]
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, {})
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -138,53 +154,88 @@ def test_scan_stopped_rds_both_cluster_and_instance(monkeypatch):
     assert len(results) == 2
     cluster_results = [r for r in results if r["type"] == "RDS_CLUSTER"]
     instance_results = [r for r in results if r["type"] == "RDS_INSTANCE"]
-    
+
     assert len(cluster_results) == 1
     assert len(instance_results) == 1
 
 
+def test_stopped_cluster_member_is_not_counted_as_a_second_candidate(monkeypatch):
+    cluster_arn = "arn:aws:rds:us-east-1:123:cluster:aurora-cluster"
+    cluster = {
+        "DBClusterIdentifier": "aurora-cluster",
+        "DBClusterArn": cluster_arn,
+        "Status": "stopped",
+        "Engine": "aurora-mysql",
+        "AvailabilityZones": ["us-east-1a"],
+    }
+    member = {
+        "DBInstanceIdentifier": "aurora-member",
+        "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:aurora-member",
+        "DBInstanceStatus": "stopped",
+        "DBClusterIdentifier": "aurora-cluster",
+        "Engine": "aurora-mysql",
+        "DBInstanceClass": "db.r5.large",
+        "AvailabilityZone": "us-east-1a",
+    }
+    fake_rds = FakeRDSClient(
+        [{"DBClusters": [cluster]}], [{"DBInstances": [member]}]
+    )
+    monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
+
+    results = rds_scanner.scan_stopped_rds()
+
+    assert [(item["type"], item["id"]) for item in results] == [
+        ("RDS_CLUSTER", "aurora-cluster")
+    ]
+    assert fake_rds.tag_calls == [cluster_arn]
+
+
 def test_scan_stopped_rds_filters_running(monkeypatch):
     """Test that running clusters/instances are filtered out."""
-    clusters_data = [{
-        "DBClusters": [
-            {
-                "DBClusterIdentifier": "stopped-cluster",
-                "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:stopped-cluster",
-                "Status": "stopped",
-                "Engine": "aurora",
-                "AvailabilityZones": ["us-east-1a"],
-            },
-            {
-                "DBClusterIdentifier": "running-cluster",
-                "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:running-cluster",
-                "Status": "available",
-                "Engine": "aurora",
-                "AvailabilityZones": ["us-east-1a"],
-            }
-        ]
-    }]
-    
-    instances_data = [{
-        "DBInstances": [
-            {
-                "DBInstanceIdentifier": "stopped-instance",
-                "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:stopped-instance",
-                "DBInstanceStatus": "stopped",
-                "Engine": "postgres",
-                "DBInstanceClass": "db.t3.micro",
-                "AvailabilityZone": "us-east-1a",
-            },
-            {
-                "DBInstanceIdentifier": "running-instance",
-                "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:running-instance",
-                "DBInstanceStatus": "available",
-                "Engine": "mysql",
-                "DBInstanceClass": "db.t3.micro",
-                "AvailabilityZone": "us-east-1a",
-            }
-        ]
-    }]
-    
+    clusters_data = [
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "stopped-cluster",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:stopped-cluster",
+                    "Status": "stopped",
+                    "Engine": "aurora",
+                    "AvailabilityZones": ["us-east-1a"],
+                },
+                {
+                    "DBClusterIdentifier": "running-cluster",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:running-cluster",
+                    "Status": "available",
+                    "Engine": "aurora",
+                    "AvailabilityZones": ["us-east-1a"],
+                },
+            ]
+        }
+    ]
+
+    instances_data = [
+        {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "stopped-instance",
+                    "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:stopped-instance",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "postgres",
+                    "DBInstanceClass": "db.t3.micro",
+                    "AvailabilityZone": "us-east-1a",
+                },
+                {
+                    "DBInstanceIdentifier": "running-instance",
+                    "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:running-instance",
+                    "DBInstanceStatus": "available",
+                    "Engine": "mysql",
+                    "DBInstanceClass": "db.t3.micro",
+                    "AvailabilityZone": "us-east-1a",
+                },
+            ]
+        }
+    ]
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, {})
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -200,18 +251,22 @@ def test_scan_stopped_rds_filters_running(monkeypatch):
 
 def test_scan_stopped_rds_empty_azs(monkeypatch):
     """Test handling of empty availability zones."""
-    clusters_data = [{
-        "DBClusters": [{
-            "DBClusterIdentifier": "no-az-cluster",
-            "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:no-az-cluster",
-            "Status": "stopped",
-            "Engine": "aurora",
-            "AvailabilityZones": [],  # Empty list
-        }]
-    }]
-    
+    clusters_data = [
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "no-az-cluster",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:no-az-cluster",
+                    "Status": "stopped",
+                    "Engine": "aurora",
+                    "AvailabilityZones": [],  # Empty list
+                }
+            ]
+        }
+    ]
+
     instances_data = [{"DBInstances": []}]
-    
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, {})
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -226,41 +281,57 @@ def test_scan_stopped_rds_empty_azs(monkeypatch):
 def test_scan_stopped_rds_pagination(monkeypatch):
     """Test pagination for both clusters and instances."""
     clusters_data = [
-        {"DBClusters": [{
-            "DBClusterIdentifier": "cluster-1",
-            "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:cluster-1",
-            "Status": "stopped",
-            "Engine": "aurora",
-            "AvailabilityZones": ["us-east-1a"],
-        }]},
-        {"DBClusters": [{
-            "DBClusterIdentifier": "cluster-2",
-            "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:cluster-2",
-            "Status": "stopped",
-            "Engine": "aurora-postgresql",
-            "AvailabilityZones": ["us-east-1b"],
-        }]}
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "cluster-1",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:cluster-1",
+                    "Status": "stopped",
+                    "Engine": "aurora",
+                    "AvailabilityZones": ["us-east-1a"],
+                }
+            ]
+        },
+        {
+            "DBClusters": [
+                {
+                    "DBClusterIdentifier": "cluster-2",
+                    "DBClusterArn": "arn:aws:rds:us-east-1:123:cluster:cluster-2",
+                    "Status": "stopped",
+                    "Engine": "aurora-postgresql",
+                    "AvailabilityZones": ["us-east-1b"],
+                }
+            ]
+        },
     ]
-    
+
     instances_data = [
-        {"DBInstances": [{
-            "DBInstanceIdentifier": "instance-1",
-            "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:instance-1",
-            "DBInstanceStatus": "stopped",
-            "Engine": "mysql",
-            "DBInstanceClass": "db.t3.micro",
-            "AvailabilityZone": "us-east-1a",
-        }]},
-        {"DBInstances": [{
-            "DBInstanceIdentifier": "instance-2",
-            "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:instance-2",
-            "DBInstanceStatus": "stopped",
-            "Engine": "postgres",
-            "DBInstanceClass": "db.t3.small",
-            "AvailabilityZone": "us-east-1c",
-        }]}
+        {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "instance-1",
+                    "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:instance-1",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "mysql",
+                    "DBInstanceClass": "db.t3.micro",
+                    "AvailabilityZone": "us-east-1a",
+                }
+            ]
+        },
+        {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "instance-2",
+                    "DBInstanceArn": "arn:aws:rds:us-east-1:123:db:instance-2",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "postgres",
+                    "DBInstanceClass": "db.t3.small",
+                    "AvailabilityZone": "us-east-1c",
+                }
+            ]
+        },
     ]
-    
+
     fake_rds = FakeRDSClient(clusters_data, instances_data, {})
     monkeypatch.setattr(rds_scanner, "_rds_client", fake_rds)
 
@@ -269,6 +340,6 @@ def test_scan_stopped_rds_pagination(monkeypatch):
     assert len(results) == 4
     cluster_ids = [r["id"] for r in results if r["type"] == "RDS_CLUSTER"]
     instance_ids = [r["id"] for r in results if r["type"] == "RDS_INSTANCE"]
-    
+
     assert set(cluster_ids) == {"cluster-1", "cluster-2"}
     assert set(instance_ids) == {"instance-1", "instance-2"}

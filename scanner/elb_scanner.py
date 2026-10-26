@@ -1,16 +1,16 @@
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/elb_scanner.py
 import logging
 from datetime import datetime, timedelta, timezone
 
 from utils.aws_factory import get_client
 from utils.aws_helpers import (
-    get_region_from_az,
-    safe_get_first,
     chunk_list,
+    get_region_from_az,
     log_and_skip,
     normalize_tags,
+    safe_get_first,
 )
+from utils.scan_context import CURRENT
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ def _get_batch_tags(arns):
     for chunk in chunk_list([a for a in (arns or []) if a], 20):
         try:
             response = elbv2.describe_tags(ResourceArns=chunk)
-            for tag_desc in (response.get("TagDescriptions", []) or []):
+            for tag_desc in response.get("TagDescriptions", []) or []:
                 arn = tag_desc.get("ResourceArn")
                 tags = tag_desc.get("Tags", []) or []
                 tag_map[arn] = normalize_tags(tags, source=f"elb:{arn}")
@@ -102,12 +102,14 @@ def _get_batch_tags_classic(names):
     for chunk in chunk_list([n for n in (names or []) if n], 20):
         try:
             response = elb.describe_tags(LoadBalancerNames=chunk)
-            for tag_desc in (response.get("TagDescriptions", []) or []):
+            for tag_desc in response.get("TagDescriptions", []) or []:
                 name = tag_desc.get("LoadBalancerName")
                 tags = tag_desc.get("Tags", []) or []
                 tag_map[name] = normalize_tags(tags, source=f"elb-classic:{name}")
         except Exception as e:
-            log_and_skip(f"elb-classic-tags-chunk({len(chunk)})", "describe_tags error", e)
+            log_and_skip(
+                f"elb-classic-tags-chunk({len(chunk)})", "describe_tags error", e
+            )
             for name in chunk:
                 tag_map.setdefault(name, {})
 
@@ -140,7 +142,9 @@ def _check_alb_nlb_usage(lb, lb_type, start, end):
         logger.debug(f"LB {lb_name} CreatedTime timezone mismatch, skipping")
         return None
 
-    namespace = "AWS/ApplicationELB" if lb_type_norm == "application" else "AWS/NetworkELB"
+    namespace = (
+        "AWS/ApplicationELB" if lb_type_norm == "application" else "AWS/NetworkELB"
+    )
     metric_name = "RequestCount" if lb_type_norm == "application" else "ProcessedBytes"
 
     metric_dimension = _get_lb_metric_dimension((lb or {}).get("LoadBalancerArn", ""))
@@ -163,14 +167,22 @@ def _check_alb_nlb_usage(lb, lb_type, start, end):
         return None
 
     from utils.metrics import statistics
+
     evidence = statistics(metrics, start, end)
     if evidence["total"] and evidence["total"] > 0:
         return False
     try:
         corroboration = cloudwatch.get_metric_statistics(
-            Namespace=namespace, MetricName="ProcessedBytes" if lb_type_norm == "application" else "NewFlowCount",
+            Namespace=namespace,
+            MetricName="ProcessedBytes"
+            if lb_type_norm == "application"
+            else "NewFlowCount",
             Dimensions=[{"Name": "LoadBalancer", "Value": metric_dimension}],
-            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"])
+            StartTime=start,
+            EndTime=end,
+            Period=86400,
+            Statistics=["Sum"],
+        )
         other = statistics(corroboration, start, end)
         if other["total"] and other["total"] > 0:
             return False
@@ -179,9 +191,19 @@ def _check_alb_nlb_usage(lb, lb_type, start, end):
             return True
         # Sparse metrics require independent structural evidence, never a zero fill.
         elbv2 = _get_elbv2_client()
-        listeners = list(elbv2.get_paginator("describe_listeners").paginate(LoadBalancerArn=lb["LoadBalancerArn"]))
-        targets = list(elbv2.get_paginator("describe_target_groups").paginate(LoadBalancerArn=lb["LoadBalancerArn"]))
-        if not any(p.get("Listeners") for p in listeners) and not any(p.get("TargetGroups") for p in targets):
+        listeners = list(
+            elbv2.get_paginator("describe_listeners").paginate(
+                LoadBalancerArn=lb["LoadBalancerArn"]
+            )
+        )
+        targets = list(
+            elbv2.get_paginator("describe_target_groups").paginate(
+                LoadBalancerArn=lb["LoadBalancerArn"]
+            )
+        )
+        if not any(p.get("Listeners") for p in listeners) and not any(
+            p.get("TargetGroups") for p in targets
+        ):
             lb["usage_evidence"] = "no-listeners-or-target-groups-review-dependencies"
             return True
     except Exception as exc:
@@ -198,10 +220,14 @@ def _check_classic_lb_usage(lb_name, created, start, end, lb=None):
     if created is not None:
         try:
             if created > start:
-                logger.debug(f"Classic LB {lb_name} created after scan window start, skipping")
+                logger.debug(
+                    f"Classic LB {lb_name} created after scan window start, skipping"
+                )
                 return None
         except TypeError:
-            logger.debug(f"Classic LB {lb_name} CreatedTime timezone mismatch, skipping")
+            logger.debug(
+                f"Classic LB {lb_name} CreatedTime timezone mismatch, skipping"
+            )
             return None
 
     try:
@@ -219,6 +245,7 @@ def _check_classic_lb_usage(lb_name, created, start, end, lb=None):
         return None
 
     from utils.metrics import statistics
+
     evidence = statistics(metrics, start, end)
     if evidence["total"] and evidence["total"] > 0:
         return False
@@ -226,8 +253,14 @@ def _check_classic_lb_usage(lb_name, created, start, end, lb=None):
         lb["usage_evidence"] = "no-registered-instances-review-dependencies"
         return True
     # RequestCount does not cover every Classic listener protocol.
-    if evidence["complete"] and lb and all(d.get("Listener", {}).get("Protocol") in ("HTTP", "HTTPS")
-                                           for d in lb.get("ListenerDescriptions", [])):
+    if (
+        evidence["complete"]
+        and lb
+        and all(
+            d.get("Listener", {}).get("Protocol") in ("HTTP", "HTTPS")
+            for d in lb.get("ListenerDescriptions", [])
+        )
+    ):
         return True
     log_and_skip(lb_name, "insufficient Classic LB evidence")
     return None
@@ -262,27 +295,42 @@ def scan_unused_elb():
         logger.info(f"Found {len(lbs)} ALB/NLB load balancers")
 
         # Batch fetch tags
-        lb_arns = [lb.get("LoadBalancerArn") for lb in lbs if isinstance(lb, dict) and lb.get("LoadBalancerArn")]
+        lb_arns = [
+            lb.get("LoadBalancerArn")
+            for lb in lbs
+            if isinstance(lb, dict) and lb.get("LoadBalancerArn")
+        ]
         tag_map = _get_batch_tags(lb_arns)
 
         for lb in lbs:
-            if not isinstance(lb, dict) or not lb.get("LoadBalancerName") or not lb.get("LoadBalancerArn"):
+            if (
+                not isinstance(lb, dict)
+                or not lb.get("LoadBalancerName")
+                or not lb.get("LoadBalancerArn")
+            ):
                 logger.warning("Skipping malformed LB record")
                 continue
-            lb_type = (lb.get("Type", "application") or "application")
+            lb_type = lb.get("Type", "application") or "application"
 
             usage = _check_alb_nlb_usage(lb, lb_type, start, now)
             if usage is True:
                 az_name = _az_name_from_v2(lb)
                 region = get_region_from_az(az_name)
-                unused.append(build_resource(
-                    "ELB", lb["LoadBalancerName"], region=region, az=az_name,
-                    arn=lb.get("LoadBalancerArn"),
-                    reason=lb.get("usage_evidence", "zero-traffic-review-dependencies"),
-                    tags=tag_map.get(lb["LoadBalancerArn"], {}),
-                    lb_type=str(lb_type).upper(),
-                    scheme=lb.get("Scheme", "") or "",
-                ))
+                unused.append(
+                    build_resource(
+                        "ELB",
+                        lb["LoadBalancerName"],
+                        region=region,
+                        az=az_name,
+                        arn=lb.get("LoadBalancerArn"),
+                        reason=lb.get(
+                            "usage_evidence", "zero-traffic-review-dependencies"
+                        ),
+                        tags=tag_map.get(lb["LoadBalancerArn"], {}),
+                        lb_type=str(lb_type).upper(),
+                        scheme=lb.get("Scheme", "") or "",
+                    )
+                )
 
         # Scan Classic Load Balancers
         classic_paginator = elb.get_paginator("describe_load_balancers")
@@ -292,7 +340,11 @@ def scan_unused_elb():
 
         logger.info(f"Found {len(classic_lbs)} Classic load balancers")
 
-        classic_names = [lb.get("LoadBalancerName") for lb in classic_lbs if isinstance(lb, dict) and lb.get("LoadBalancerName")]
+        classic_names = [
+            lb.get("LoadBalancerName")
+            for lb in classic_lbs
+            if isinstance(lb, dict) and lb.get("LoadBalancerName")
+        ]
         classic_tag_map = _get_batch_tags_classic(classic_names)
 
         for lb in classic_lbs:
@@ -300,19 +352,28 @@ def scan_unused_elb():
                 continue
             lb_name = lb["LoadBalancerName"]
 
-            usage = _check_classic_lb_usage(lb_name, lb.get("CreatedTime"), start, now, lb=lb)
+            usage = _check_classic_lb_usage(
+                lb_name, lb.get("CreatedTime"), start, now, lb=lb
+            )
             if usage is True:
                 az_list = lb.get("AvailabilityZones", []) or []
                 first_az = safe_get_first(az_list, "") or ""
                 if not isinstance(first_az, str):
                     first_az = ""
-                unused.append(build_resource(
-                    "ELB", lb_name, region=get_region_from_az(first_az), az=first_az,
-                    reason=lb.get("usage_evidence", "zero-traffic-review-dependencies"),
-                    tags=classic_tag_map.get(lb_name, {}),
-                    lb_type="CLASSIC",
-                    scheme=lb.get("Scheme", "") or "",
-                ))
+                unused.append(
+                    build_resource(
+                        "ELB",
+                        lb_name,
+                        region=get_region_from_az(first_az),
+                        az=first_az,
+                        reason=lb.get(
+                            "usage_evidence", "zero-traffic-review-dependencies"
+                        ),
+                        tags=classic_tag_map.get(lb_name, {}),
+                        lb_type="CLASSIC",
+                        scheme=lb.get("Scheme", "") or "",
+                    )
+                )
 
         logger.info(f"Found {len(unused)} unused load balancers")
     except Exception as e:

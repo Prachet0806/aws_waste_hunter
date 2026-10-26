@@ -2,7 +2,8 @@
 Setup file for AWS Waste Hunter.
 Allows installation in development mode: pip install -e .
 """
-from setuptools import setup, find_packages
+
+from setuptools import find_packages, setup
 
 setup(
     name="aws-waste-hunter",

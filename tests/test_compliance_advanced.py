@@ -1,4 +1,3 @@
-import pytest
 from compliance import tag_checker
 
 
@@ -8,10 +7,10 @@ class TestRequiredTagsConfiguration:
     def test_default_required_tags(self, monkeypatch):
         """Test default required tags."""
         monkeypatch.delenv("REQUIRED_TAGS", raising=False)
-        
+
         # Reset cached tags
         tags = tag_checker._get_required_tags()
-        
+
         assert "owner" in tags
         assert "env" in tags
         assert "cost-center" in tags
@@ -19,9 +18,9 @@ class TestRequiredTagsConfiguration:
     def test_custom_required_tags(self, monkeypatch):
         """Test custom required tags from env var."""
         monkeypatch.setenv("REQUIRED_TAGS", "team,project,environment")
-        
+
         tags = tag_checker._get_required_tags()
-        
+
         assert "team" in tags
         assert "project" in tags
         assert "environment" in tags
@@ -30,9 +29,9 @@ class TestRequiredTagsConfiguration:
     def test_required_tags_with_spaces(self, monkeypatch):
         """Test tags with spaces are trimmed."""
         monkeypatch.setenv("REQUIRED_TAGS", " owner , env , cost-center ")
-        
+
         tags = tag_checker._get_required_tags()
-        
+
         assert tags == ["owner", "env", "cost-center"]
 
 
@@ -42,12 +41,12 @@ class TestTagComplianceChecking:
     def test_compliant_resources(self, monkeypatch):
         """Test resources with all required tags."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
-        
+
         resources = [
             {
                 "type": "EBS",
                 "id": "vol-1",
-                "tags": {"owner": "sre", "env": "prod", "extra": "value"}
+                "tags": {"owner": "sre", "env": "prod", "extra": "value"},
             }
         ]
 
@@ -58,13 +57,9 @@ class TestTagComplianceChecking:
     def test_missing_single_tag(self, monkeypatch):
         """Test resource missing one required tag."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env,cost-center")
-        
+
         resources = [
-            {
-                "type": "EC2",
-                "id": "i-1",
-                "tags": {"owner": "sre", "env": "prod"}
-            }
+            {"type": "EC2", "id": "i-1", "tags": {"owner": "sre", "env": "prod"}}
         ]
 
         violations = tag_checker.check_tag_compliance(resources)
@@ -77,14 +72,8 @@ class TestTagComplianceChecking:
     def test_missing_all_tags(self, monkeypatch):
         """Test resource with no tags."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
-        
-        resources = [
-            {
-                "type": "EBS",
-                "id": "vol-1",
-                "tags": {}
-            }
-        ]
+
+        resources = [{"type": "EBS", "id": "vol-1", "tags": {}}]
 
         violations = tag_checker.check_tag_compliance(resources)
 
@@ -94,12 +83,16 @@ class TestTagComplianceChecking:
     def test_multiple_violations(self, monkeypatch):
         """Test multiple resources with violations."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
-        
+
         resources = [
             {"type": "EBS", "id": "vol-1", "tags": {"owner": "sre"}},  # Missing env
             {"type": "EC2", "id": "i-1", "tags": {"env": "prod"}},  # Missing owner
             {"type": "ELB", "id": "lb-1", "tags": {}},  # Missing both
-            {"type": "RDS", "id": "db-1", "tags": {"owner": "dba", "env": "staging"}},  # OK
+            {
+                "type": "RDS",
+                "id": "db-1",
+                "tags": {"owner": "dba", "env": "staging"},
+            },  # OK
         ]
 
         violations = tag_checker.check_tag_compliance(resources)
@@ -114,7 +107,7 @@ class TestTagComplianceChecking:
     def test_no_tags_field(self, monkeypatch):
         """Test resource without tags field."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner")
-        
+
         resources = [
             {"type": "EBS", "id": "vol-1"}  # No tags field
         ]
@@ -127,7 +120,7 @@ class TestTagComplianceChecking:
     def test_empty_resources(self, monkeypatch):
         """Test with no resources."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env")
-        
+
         resources = []
 
         violations = tag_checker.check_tag_compliance(resources)
@@ -137,13 +130,9 @@ class TestTagComplianceChecking:
     def test_violation_details(self, monkeypatch):
         """Test violation details are complete."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner,env,cost-center")
-        
+
         resources = [
-            {
-                "type": "EC2",
-                "id": "i-test",
-                "tags": {"owner": "john", "extra": "tag"}
-            }
+            {"type": "EC2", "id": "i-test", "tags": {"owner": "john", "extra": "tag"}}
         ]
 
         violations = tag_checker.check_tag_compliance(resources)
@@ -163,12 +152,12 @@ class TestCaseInsensitivity:
     def test_case_sensitive_tags(self, monkeypatch):
         """Test that tag keys are case-sensitive."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner")
-        
+
         resources = [
             {
                 "type": "EBS",
                 "id": "vol-1",
-                "tags": {"Owner": "sre"}  # Capital O
+                "tags": {"Owner": "sre"},  # Capital O
             }
         ]
 
@@ -185,7 +174,7 @@ class TestEdgeCases:
     def test_single_required_tag(self, monkeypatch):
         """Test with only one required tag."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner")
-        
+
         resources = [
             {"type": "EBS", "id": "vol-1", "tags": {}},
             {"type": "EC2", "id": "i-1", "tags": {"owner": "sre"}},
@@ -212,12 +201,12 @@ class TestEdgeCases:
     def test_tag_value_empty_string(self, monkeypatch):
         """Test that empty tag values still count as present."""
         monkeypatch.setenv("REQUIRED_TAGS", "owner")
-        
+
         resources = [
             {
                 "type": "EBS",
                 "id": "vol-1",
-                "tags": {"owner": ""}  # Empty value but key exists
+                "tags": {"owner": ""},  # Empty value but key exists
             }
         ]
 
@@ -275,8 +264,12 @@ class TestComplianceStats:
 
     def test_violations_param_overrides(self, monkeypatch):
         """Test passing violations directly avoids re-computation."""
-        resources = [{"type": "EBS", "id": "vol-1", "tags": {"owner": "sre", "env": "prod"}}]
-        violations = [{"resource_id": "vol-1", "type": "EBS", "missing_tags": ["owner"]}]
+        resources = [
+            {"type": "EBS", "id": "vol-1", "tags": {"owner": "sre", "env": "prod"}}
+        ]
+        violations = [
+            {"resource_id": "vol-1", "type": "EBS", "missing_tags": ["owner"]}
+        ]
 
         stats = tag_checker.compute_compliance_stats(resources, violations)
 

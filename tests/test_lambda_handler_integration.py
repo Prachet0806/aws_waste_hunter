@@ -1,13 +1,14 @@
 import pytest
+
 import lambda_handler
 
 
 @pytest.fixture(autouse=True)
 def _mock_new_scanners(monkeypatch):
     """Stub the newer scanners so existing tests remain deterministic."""
-    monkeypatch.setattr(lambda_handler, "scan_unattached_eips", lambda: [])
-    monkeypatch.setattr(lambda_handler, "scan_orphaned_snapshots", lambda: [])
-    monkeypatch.setattr(lambda_handler, "scan_idle_rds", lambda: [])
+    monkeypatch.setattr(lambda_handler, "scan_unattached_eips", list)
+    monkeypatch.setattr(lambda_handler, "scan_orphaned_snapshots", list)
+    monkeypatch.setattr(lambda_handler, "scan_idle_rds", list)
 
 
 class TestHandlerIntegration:
@@ -15,11 +16,14 @@ class TestHandlerIntegration:
 
     def test_full_scan_success(self, monkeypatch):
         """Test complete successful scan with all scanners."""
+
         def mock_scan_ebs():
             return [{"type": "EBS", "id": "vol-1", "size_gb": 10, "tags": {}}]
 
         def mock_scan_ec2():
-            return [{"type": "EC2", "id": "i-1", "instance_type": "t3.micro", "tags": {}}]
+            return [
+                {"type": "EC2", "id": "i-1", "instance_type": "t3.micro", "tags": {}}
+            ]
 
         def mock_scan_elb():
             return [{"type": "ELB", "id": "lb-1", "tags": {}}]
@@ -52,11 +56,14 @@ class TestHandlerIntegration:
 
     def test_scan_partial_failure(self, monkeypatch):
         """Test handler with some scanner failures."""
+
         def mock_scan_ebs():
             raise RuntimeError("EBS API unavailable")
 
         def mock_scan_ec2():
-            return [{"type": "EC2", "id": "i-1", "instance_type": "t3.micro", "tags": {}}]
+            return [
+                {"type": "EC2", "id": "i-1", "instance_type": "t3.micro", "tags": {}}
+            ]
 
         def mock_scan_elb():
             raise RuntimeError("ELB throttled")
@@ -87,6 +94,7 @@ class TestHandlerIntegration:
 
     def test_delivery_failure(self, monkeypatch):
         """Test handler with delivery failures."""
+
         def mock_scan():
             return []
 
@@ -113,6 +121,7 @@ class TestHandlerIntegration:
 
     def test_all_scanners_fail(self, monkeypatch):
         """Test handler when all scanners fail."""
+
         def mock_fail():
             raise RuntimeError("AWS API error")
 
@@ -139,6 +148,7 @@ class TestHandlerIntegration:
 
     def test_all_delivery_fails(self, monkeypatch):
         """Test handler when all delivery methods fail."""
+
         def mock_scan():
             return [{"type": "EBS", "id": "vol-1", "size_gb": 10, "tags": {}}]
 
@@ -146,9 +156,9 @@ class TestHandlerIntegration:
             raise RuntimeError("Delivery failed")
 
         monkeypatch.setattr(lambda_handler, "scan_unattached_ebs", mock_scan)
-        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_unused_elb", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", lambda: [])
+        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", list)
+        monkeypatch.setattr(lambda_handler, "scan_unused_elb", list)
+        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", list)
         monkeypatch.setattr(lambda_handler, "send_report", mock_fail)
         monkeypatch.setattr(lambda_handler, "archive_report", mock_fail)
         monkeypatch.setenv("PRICING_MODE", "static")
@@ -161,6 +171,7 @@ class TestHandlerIntegration:
 
     def test_estimator_failure(self, monkeypatch):
         """Test handler when cost estimation fails."""
+
         def mock_scan():
             return [{"type": "EBS", "id": "vol-1", "size_gb": 10, "tags": {}}]
 
@@ -174,9 +185,9 @@ class TestHandlerIntegration:
             pass
 
         monkeypatch.setattr(lambda_handler, "scan_unattached_ebs", mock_scan)
-        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_unused_elb", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", lambda: [])
+        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", list)
+        monkeypatch.setattr(lambda_handler, "scan_unused_elb", list)
+        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", list)
         monkeypatch.setattr(lambda_handler, "estimate_monthly_waste", mock_estimate)
         monkeypatch.setattr(lambda_handler, "send_report", mock_send)
         monkeypatch.setattr(lambda_handler, "archive_report", mock_archive)
@@ -189,6 +200,7 @@ class TestHandlerIntegration:
 
     def test_compliance_check_failure(self, monkeypatch):
         """Test handler when compliance checking fails."""
+
         def mock_scan():
             return [{"type": "EBS", "id": "vol-1", "size_gb": 10, "tags": {}}]
 
@@ -202,9 +214,9 @@ class TestHandlerIntegration:
             pass
 
         monkeypatch.setattr(lambda_handler, "scan_unattached_ebs", mock_scan)
-        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_unused_elb", lambda: [])
-        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", lambda: [])
+        monkeypatch.setattr(lambda_handler, "scan_idle_ec2", list)
+        monkeypatch.setattr(lambda_handler, "scan_unused_elb", list)
+        monkeypatch.setattr(lambda_handler, "scan_stopped_rds", list)
         monkeypatch.setattr(lambda_handler, "check_tag_compliance", mock_check)
         monkeypatch.setattr(lambda_handler, "send_report", mock_send)
         monkeypatch.setattr(lambda_handler, "archive_report", mock_archive)
@@ -217,6 +229,7 @@ class TestHandlerIntegration:
 
     def test_empty_scan_results(self, monkeypatch):
         """Test handler when no waste is found."""
+
         def mock_scan():
             return []
 
@@ -236,7 +249,9 @@ class TestHandlerIntegration:
 
         result = lambda_handler.handler({}, {})
 
-        assert result["status"] == "partial"  # Empty mocks do not attest to complete discovery.
+        assert (
+            result["status"] == "partial"
+        )  # Empty mocks do not attest to complete discovery.
         assert result["resources"] == 0
         assert result["monthly_waste"] == 0
         assert result["scan_errors"] == 0

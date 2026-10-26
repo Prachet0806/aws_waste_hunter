@@ -1,11 +1,11 @@
-from utils.scan_context import CURRENT, record_error, protected
 # scanner/snapshot_scanner.py
 import logging
 import os
 from datetime import datetime, timezone
 
-from utils.aws_factory import get_client, client_region
+from utils.aws_factory import client_region, get_client
 from utils.aws_helpers import log_and_skip, normalize_tags
+from utils.scan_context import CURRENT, protected
 from utils.schema import build_resource
 
 logger = logging.getLogger(__name__)
@@ -50,9 +50,11 @@ def _collect_ami_snapshot_ids(ec2):
         log_and_skip("ami-snapshots", "describe_images paginator unavailable", e)
         raise
     try:
-        for page in paginator.paginate(Owners=["self"], IncludeDeprecated=True, IncludeDisabled=True):
-            for image in ((page or {}).get("Images", []) or []):
-                for mapping in ((image or {}).get("BlockDeviceMappings", []) or []):
+        for page in paginator.paginate(
+            Owners=["self"], IncludeDeprecated=True, IncludeDisabled=True
+        ):
+            for image in (page or {}).get("Images", []) or []:
+                for mapping in (image or {}).get("BlockDeviceMappings", []) or []:
                     ebs = (mapping or {}).get("Ebs", {}) or {}
                     snapshot_id = ebs.get("SnapshotId")
                     if snapshot_id:
@@ -80,21 +82,26 @@ def scan_orphaned_snapshots():
         paginator = ec2.get_paginator("describe_snapshots")
 
         for page in paginator.paginate(OwnerIds=["self"]):
-            for s in ((page or {}).get("Snapshots", []) or []):
+            for s in (page or {}).get("Snapshots", []) or []:
                 if not isinstance(s, dict):
                     continue
                 sid = s.get("SnapshotId")
                 if not sid:
                     logger.warning("Skipping snapshot record without SnapshotId")
                     continue
-                if protected(normalize_tags(s.get("Tags", []))) or s.get("State", "completed") != "completed":
+                if (
+                    protected(normalize_tags(s.get("Tags", [])))
+                    or s.get("State", "completed") != "completed"
+                ):
                     log_and_skip(sid, "protected or incomplete snapshot")
                     continue
                 if sid in referenced:
                     continue
 
                 try:
-                    permissions = ec2.describe_snapshot_attribute(SnapshotId=sid, Attribute="createVolumePermission")
+                    permissions = ec2.describe_snapshot_attribute(
+                        SnapshotId=sid, Attribute="createVolumePermission"
+                    )
                 except Exception as exc:
                     log_and_skip(sid, "snapshot sharing unverifiable", exc)
                     continue
@@ -112,7 +119,9 @@ def scan_orphaned_snapshots():
                     log_and_skip(sid, "unparseable StartTime")
                     continue
                 if start_ts > cutoff:
-                    logger.debug(f"Snapshot {sid} younger than {min_age_days}d, skipping")
+                    logger.debug(
+                        f"Snapshot {sid} younger than {min_age_days}d, skipping"
+                    )
                     continue
 
                 try:
@@ -123,16 +132,23 @@ def scan_orphaned_snapshots():
                     days_old = round((now - start_time).total_seconds() / 86400, 1)
                 except Exception:
                     days_old = round((now.timestamp() - start_ts) / 86400, 1)
-                orphaned.append(build_resource(
-                    "SNAPSHOT", sid, region=region, az="",
-                    reason="unreferenced-by-owned-ami-review-retention",
-                    age_days=days_old,
-                    tags=normalize_tags(s.get("Tags", []), source=f"snap:{sid}"),
-                    size_gb=size,
-                    volume_id=s.get("VolumeId", "") or "",
-                    created_at=start_time.isoformat() if hasattr(start_time, "isoformat") else "",
-                    days_old=days_old,
-                ))
+                orphaned.append(
+                    build_resource(
+                        "SNAPSHOT",
+                        sid,
+                        region=region,
+                        az="",
+                        reason="unreferenced-by-owned-ami-review-retention",
+                        age_days=days_old,
+                        tags=normalize_tags(s.get("Tags", []), source=f"snap:{sid}"),
+                        size_gb=size,
+                        volume_id=s.get("VolumeId", "") or "",
+                        created_at=start_time.isoformat()
+                        if hasattr(start_time, "isoformat")
+                        else "",
+                        days_old=days_old,
+                    )
+                )
 
         logger.info(f"Found {len(orphaned)} orphaned snapshots")
     except Exception as e:
